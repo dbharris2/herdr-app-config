@@ -14,6 +14,16 @@ const key = () => JSON.stringify(location());
 const READ = ["--no-optional-locks", "-c", "core.fsmonitor=false", "-c", "diff.autoRefreshIndex=false"];
 const countLines = (text) => text ? text.split("\n").length - Number(text.endsWith("\n")) : 0;
 
+// Classify by common repository conventions; each file belongs to one category.
+function category(path) {
+  const p = path.toLowerCase(), name = p.split("/").pop();
+  if (/(^|\/)(__generated__|generated|gen|dist|coverage|vendor)(\/|$)/.test(p) || /(?:^|\/)drizzle\/(?:meta\/|\d{4}_[^/]+\.sql$)/.test(p) || /(?:\.generated\.|\.min\.|\.gen\.ts$)/.test(name) || /^(?:package-lock\.json|pnpm-lock\.yaml|yarn\.lock|bun\.lockb?|cargo\.lock)$/.test(name)) return "Generated";
+  if (/(^|\/)(__tests__|tests?|specs?|fixtures?|__fixtures__)(\/|$)/.test(p) || /(?:^|[._-])(?:test|spec)\.[^.]+$/.test(name) || /_test\.[^.]+$/.test(name)) return "Tests";
+  if (/(^|\/)(?:stories|storybook|\.storybook)(\/|$)/.test(p) || /\.(?:stories|story)\.[^.]+$/.test(name)) return "Stories";
+  if (/(^|\/)(?:docs?|documentation)(\/|$)/.test(p) || /\.(?:md|mdx|rst|adoc|txt)$/.test(name)) return "Documentation";
+  return "Implementation";
+}
+
 // Numbers each diff line once, so a frame only draws the rows on screen.
 function diffRows(lines) {
   let old = 0, next = 0;
@@ -31,6 +41,8 @@ function diffRows(lines) {
 export default class Changes extends View {
   init(_props, cx) {
     this.files = []; this.rows = []; this.totals = null; this.diffWidth = 0; this.message = ""; this.handle = cx.focus_handle();
+    this.showTotal = localStorage.getItem("changes.showTotal") === "true";
+    this.sectionOpen = {};
     this.input = InputState.new({ placeholder: "Change description" });
     this.input.on("change", (_e, cx) => {
       const hadMessage = Boolean(this.message.trim());
@@ -41,7 +53,9 @@ export default class Changes extends View {
     this.input.on("focus", (_e, cx) => { this.typing = true; cx.notify(); });
     this.input.on("blur", (_e, cx) => { this.typing = false; cx.notify(); });
     this.refresh(cx);
-    cx.timer.every(10000, (cx) => this.refresh(cx));
+    cx.timer.every(10000, (cx) => {
+      if (location().on || !this.watched) this.refresh(cx);
+    });
   }
 
   watch(root, cx) {
@@ -53,7 +67,7 @@ export default class Changes extends View {
           await watchFolder(root);
           if (this.watched === root) this.refresh(cx);
         }
-      } catch { this.watched = null; }
+      } catch { if (this.watched === root) this.watched = null; }
     });
   }
 
@@ -66,6 +80,7 @@ export default class Changes extends View {
     }
     if (!cwd) return;
     this.loading = true;
+    const before = JSON.stringify([this.root, this.files, this.totals, this.groupCounts, this.limited, this.error, this.open, this.rows]);
     cx.spawn(async (cx) => {
       try {
         const top = await exec("jj", ["--color=never", "root"], { cwd, on });
@@ -79,20 +94,34 @@ export default class Changes extends View {
         const stat = await exec("jj", ["--ignore-working-copy", "--no-pager", "--color=never", "log", "-r", "@", "--no-graph", "-T", template], { cwd: root, on });
         if (stat.code !== 0) throw new Error(stat.stderr || "Cannot read diff statistics");
         const entries = stat.stdout.split("\n").filter(Boolean).map(line => JSON.parse(line));
-        const totals = entries.reduce((sum, file) => ({ add: sum.add + file.add, del: sum.del + file.del }), { add: 0, del: 0 });
+        const totals = {}, groupCounts = {};
+        for (const file of entries) {
+          const type = category(file.path);
+          groupCounts[type] = (groupCounts[type] || 0) + 1;
+          for (const key of ["Total", type]) {
+            totals[key] ??= { add: 0, del: 0 };
+            totals[key].add += file.add; totals[key].del += file.del;
+          }
+        }
+        totals.Total ??= { add: 0, del: 0 };
+        totals.Implementation ??= { add: 0, del: 0 };
         const files = entries.slice(0, 1000);
         if (key() !== context) return;
-        this.root = root; this.on = on; this.files = files; this.totals = totals; this.limited = entries.length > 1000; this.error = null;
+        this.root = root; this.on = on; this.files = files; this.totals = totals; this.groupCounts = groupCounts; this.limited = entries.length > 1000; this.error = null;
         this.watch(root, cx);
         if (this.open && !files.some((f) => f.path === this.open)) { this.open = null; this.setLines([]); }
         // The first file's diff shows until you pick another.
-        if (!this.open && !this.closed && files.length) this.open = files[0].path;
+        if (!this.open && !this.closed && files.length) this.open = (files.find(f => category(f.path) === "Implementation") || files[0]).path;
         if (this.open) {
           try { await this.load(this.open, context); }
           catch { if (key() === context) this.setLines(["Cannot preview this diff (too large or unreadable)"]); }
         }
       } catch (e) { if (key() === context) this.error = String(e); }
-      finally { this.loading = false; cx.notify(); }
+      finally {
+        this.loading = false;
+        const after = JSON.stringify([this.root, this.files, this.totals, this.groupCounts, this.limited, this.error, this.open, this.rows]);
+        if (before !== after) cx.notify();
+      }
     });
   }
 
@@ -148,6 +177,12 @@ export default class Changes extends View {
   render(cx) {
     if (key() !== this.context) this.refresh(cx);
     const t = theme();
+    const count = this.totals && this.totals[this.showTotal ? "Total" : "Implementation"];
+    const breakdown = this.totals && ["Implementation", "Tests", "Documentation", "Stories", "Generated", "Total"].filter(k => this.totals[k]).map(k => `${k}: +${this.totals[k].add} −${this.totals[k].del}`).join("\n");
+    const filtered = this.totals && (this.totals.Total.add !== this.totals.Implementation.add || this.totals.Total.del !== this.totals.Implementation.del);
+    const groups = ["Implementation", "Tests", "Documentation", "Stories", "Generated"].map(name => ({ name, files: this.files.filter(f => category(f.path) === name) })).filter(g => g.files.length);
+    const groupOpen = name => this.sectionOpen[name] ?? (name === "Implementation" || (!groups.some(g => g.name === "Implementation") && name === groups[0]?.name));
+    const listHeight = groups.reduce((n, g) => n + 28 + (groupOpen(g.name) ? g.files.length * 28 : 0), 12);
     const enabled = Boolean(this.message.trim() && this.root && !this.busy && !this.loading);
     return v_flex().id("changes").size_full().min_h(0).rounded(10).overflow_hidden().bg(t.background).border_1().border_color(t.border).text_color(t.foreground).text_size(13).track_focus(this.handle)
       .on_key_down((e, cx) => {
@@ -157,13 +192,30 @@ export default class Changes extends View {
         .child(div().font_semibold().child("Changes"))
         .child(div().px(5).py(1).rounded(4).border_1().border_color(t.border).text_size(10).text_color(t.muted).child(`${this.files.length} files`))
         .child(div().flex_1())
-        .when(Boolean(this.totals), el => el.child(div().text_size(11).text_color(t.ansi2).child(`+${this.totals.add}`)).child(div().text_size(11).text_color(t.ansi1).child(`−${this.totals.del}`))))
-      .child(v_flex().id("changes-list").flex_none().h(Math.min(200, Math.max(44, this.files.length * 28 + 12))).overflow_y_scrollbar().p(6).border_b(1).border_color(t.border).children(this.files.map((f) => {
+        .when(Boolean(count), el => el.child(h_flex().id("changes-line-count").gap(5).items_center().cursor_pointer().rounded(4).hover(s => s.bg(t.hover))
+          .tooltip(`${breakdown}\nClick to show ${this.showTotal ? "implementation" : "total"} line counts`)
+          .on_click((_e, cx) => { this.showTotal = !this.showTotal; localStorage.setItem("changes.showTotal", String(this.showTotal)); cx.notify(); })
+          .child(div().text_size(10).text_color(t.muted).child(this.showTotal ? "All" : "Impl"))
+          .child(div().text_size(11).text_color(t.ansi2).child(`+${count.add}`))
+          .child(div().text_size(11).text_color(t.ansi1).child(`−${count.del}`))
+          .when(!this.showTotal && filtered, e => e.child(div().text_size(11).text_color(t.muted).child("*"))))))
+      .child(v_flex().id("changes-list").flex_none().h(Math.min(200, Math.max(44, listHeight))).overflow_y_scrollbar().p(6).border_b(1).border_color(t.border).children(groups.flatMap(group => {
+        const open = groupOpen(group.name), stats = this.totals?.[group.name];
+        const header = h_flex().id(`changes-group-${group.name}`).h(28).flex_none().px(8).gap(6).items_center().rounded(6).cursor_pointer().bg(t.raised).hover(s => s.bg(t.hover))
+          .on_click((_e, cx) => { this.sectionOpen[group.name] = !open; cx.notify(); })
+          .child(div().text_size(11).text_color(t.muted).child(open ? "▾" : "▸"))
+          .child(div().text_size(11).text_color(t.foreground).child(group.name))
+          .child(div().text_size(11).text_color(t.dim).child(String(this.groupCounts?.[group.name] ?? group.files.length)))
+          .child(div().flex_1())
+          .when(Boolean(stats), e => e.child(div().text_size(11).text_color(t.ansi2).child(`+${stats.add}`)).child(div().text_size(11).text_color(t.ansi1).child(`−${stats.del}`)));
+        const rows = open ? group.files.map((f) => {
         const parts = f.path.split("/"), name = parts.pop();
         return h_flex().id(`change-${f.path}`).h(28).flex_none().px(8).gap(8).items_center().rounded(7).cursor_pointer().when(this.open === f.path, (e) => e.bg(t.selected)).hover((s) => s.bg(t.hover)).on_click((_e, cx) => this.pick(f.path, cx))
           .child(div().w(14).text_size(11).text_color(f.status === "A" ? t.ansi2 : f.status === "D" ? t.ansi1 : f.status === "U" ? t.ansi1 : t.blocked).child(f.status))
           .child(h_flex().flex_1().min_w(0).child(div().text_color(t.dim).truncate().child(parts.length ? parts.join("/") + "/" : "")).child(div().max_w(260).min_w(0).truncate().child(name)))
           .when(f.add > 0, (e) => e.child(div().flex_none().text_size(11).text_color(t.ansi2).child(`+${f.add}`))).when(f.del > 0, (e) => e.child(div().flex_none().text_size(11).text_color(t.ansi1).child(`−${f.del}`)));
+        }) : [];
+        return [header, ...rows];
       })).when(!this.files.length, (e) => e.child(div().p(8).text_color(t.dim).child(this.error || (this.loading ? "Loading changes…" : this.root ? "No changes in the working copy" : "No folder")))))
       .when(this.limited, el => el.child(div().px(12).py(4).text_size(11).text_color(t.dim).child("Showing the first 1,000 changed files")))
       .child(div().flex_1().min_h(0).relative().font_family(settings().font_family ?? "JetBrains Mono").text_size(11)

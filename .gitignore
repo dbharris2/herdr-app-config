@@ -1,0 +1,4 @@
+# Herdr regenerates this API declaration when checking or starting a mod.
+gpui-kit.d.ts
+
+node_modules/
