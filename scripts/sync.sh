@@ -22,7 +22,7 @@ case "$direction" in
   *) echo "Unknown sync direction: $direction" >&2; exit 2 ;;
 esac
 
-mods=(jj-changes jj-log jj-spaces my-agents my-tabs calendar)
+mods=(jj-changes jj-log jj-spaces my-agents my-tabs calendar pr-monitor)
 files=(layouts/jj-main.json keys.json settings.json)
 
 # Check every source before changing anything at the destination.

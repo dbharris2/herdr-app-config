@@ -1,6 +1,51 @@
 import { View, div, svg, image } from "gpui-kit";
 import { h_flex, ScrollHandle } from "gpui-base";
-import { spaces, panes, run, openOverlay, theme, window, shared, layout, settings } from "herdr";
+import { spaces, panes, run, openOverlay, theme, window, shared, setShared, layout, settings, exec } from "herdr";
+
+const searches = ["is:pr is:open -is:draft review-requested:@me", "is:pr is:open author:@me", "is:pr is:open -is:draft reviewed-by:@me -author:@me"];
+const query = q => `{ search(query: ${JSON.stringify(q)}, type: ISSUE, first: 50) { nodes { ... on PullRequest { id number title url isDraft updatedAt repository { nameWithOwner } author { login avatarUrl(size: 64) } reviewRequests(first: 100) { nodes { requestedReviewer { __typename ... on User { login avatarUrl(size: 64) } ... on Team { slug name avatarUrl(size: 64) } } } } reviewDecision mergeStateStatus additions deletions changedFiles reviews(last: 100) { nodes { state submittedAt author { login avatarUrl(size: 64) } } } } } } }`;
+
+function approved(pr) {
+  const latest = new Map();
+  for (const review of pr.reviews?.nodes ?? []) {
+    const login = review.author?.login;
+    if (!login) continue;
+    const previous = latest.get(login);
+    if (!previous || !review.submittedAt || !previous.submittedAt || review.submittedAt > previous.submittedAt) latest.set(login, review);
+  }
+  return [...latest.values()].some(r => r.state === "APPROVED");
+}
+function group([requested, authored, reviewed]) {
+  const sections = { "Needs my review": [], "Changes requested": [], "Approved": [], "Waiting for review": [], "Reviewed": [], "Drafts": [] };
+  const changed = pr => pr.reviewDecision === "APPROVED" || pr.reviewDecision === "CHANGES_REQUESTED" || approved(pr);
+  sections["Needs my review"] = requested.filter(pr => !changed(pr));
+  for (const pr of authored) {
+    const section = pr.isDraft ? "Drafts" : pr.reviewDecision === "APPROVED" || (pr.reviewDecision !== "CHANGES_REQUESTED" && approved(pr)) ? "Approved" : pr.reviewDecision === "CHANGES_REQUESTED" ? "Changes requested" : "Waiting for review";
+    sections[section].push(pr);
+  }
+  const seen = new Set(sections["Needs my review"].map(pr => pr.id));
+  for (const pr of [...reviewed, ...requested.filter(changed)]) if (!seen.has(pr.id)) { seen.add(pr.id); sections.Reviewed.push(pr); }
+  return sections;
+}
+let cached = null, fetchedAt = 0, pending = null;
+async function fetchSections(force = false) {
+  if (pending) return pending;
+  if (!force && cached && Date.now() - fetchedAt < 300000) return cached;
+  pending = (async () => {
+    const results = await Promise.all(searches.map(async search => {
+      const r = await exec("gh", ["api", "graphql", "-f", `query=${query(search)}`], { timeout: 30000 });
+      if (r.code !== 0) throw new Error(r.stderr || "Could not run gh. Check that GitHub CLI is installed and authenticated.");
+      const data = JSON.parse(r.stdout);
+      if (data.errors?.length) throw new Error(data.errors[0].message);
+      if (!data.data?.search?.nodes) throw new Error("Unexpected response from GitHub.");
+      return data.data.search.nodes.filter(pr => pr.id);
+    }));
+    cached = group(results); fetchedAt = Date.now();
+    return cached;
+  })();
+  try { return await pending; } finally { pending = null; }
+}
+
 
 function find(node, id) {
   if (node?.id === id) return node;
@@ -12,10 +57,22 @@ function find(node, id) {
 }
 
 export default class Tabs extends View {
-  init() {
+  init(_props, cx) {
+    this.refreshPRCounts(cx);
+    cx.timer.every(300000, cx => this.refreshPRCounts(cx));
     this.pressed = null;
     this.scroll = ScrollHandle.new();
     this.panels = JSON.parse(localStorage.getItem("panels") ?? "{}");
+  }
+
+  refreshPRCounts(cx) {
+    cx.spawn(async cx => {
+      try {
+        const sections = await fetchSections();
+        setShared("pr-monitor.counts", { review: sections["Needs my review"].length, changes: sections["Changes requested"].length, approved: sections.Approved.length });
+        cx.notify();
+      } catch { /* Keep the last successful counts. */ }
+    });
   }
 
   // The side panel is remembered per space: switching shows that space's choice
@@ -87,7 +144,7 @@ export default class Tabs extends View {
       ? Math.max(10, (root.traffic_lights[0] + 64) / settings().zoom - (sidebar?.hidden ? 0 : sidebar?.size?.px ?? 0))
       : 10;
     const panel = find(root, "panel"), body = find(root, "panel-body");
-    const enabled = [...(shared("workspace.panels") ?? ["files", "changes"]), "calendar"];
+    const enabled = [...(shared("workspace.panels") ?? ["files", "changes"]), "calendar", "pr-monitor"];
     this.syncPanel(space, panel, body, enabled);
     const panelButton = (id, label, icon) => {
       const on = panel && !panel.hidden && body?.active === id;
@@ -97,7 +154,12 @@ export default class Tabs extends View {
         .on_click(() => {
           if (on) run("layout.hide", { id: "panel" });
           else { run("layout.select", { stack: "panel-body", child: id }); run("layout.show", { id: "panel" }); }
-        }).child(svg(icon).size(14)).child(label);
+        }).child(id === "pr-monitor" ? image(icon).size(14) : svg(icon).size(14)).child(label)
+        .when(id === "pr-monitor" && Boolean(shared("pr-monitor.counts")), el => {
+          const counts = shared("pr-monitor.counts");
+          return el.children([[counts.review, "#f78166"], [counts.changes, t.ansi1], [counts.approved, t.ansi2]]
+            .filter(([count]) => count > 0).map(([count, color]) => div().text_size(11).font_semibold().text_color(color).child(count > 99 ? "99+" : String(count))));
+        });
     };
     return h_flex().size_full().min_w(0).px(10).pl(lightsPadding).gap(3).items_center().bg(t.chrome).border_b(1).border_color(t.border)
       .on_mouse_up("left", () => { this.pressed = null; })
@@ -109,6 +171,7 @@ export default class Tabs extends View {
       .when(enabled.includes("files"), el => el.child(panelButton("files", "Files", "mods/files/file.svg")))
       .when(enabled.includes("changes"), el => el.child(panelButton("changes", "Changes", "mods/changes/changes.svg")))
       .child(panelButton("calendar", "Calendar", "mods/workspace-chrome/clock.svg"))
+      .child(panelButton("pr-monitor", "Pull requests", "mods/pr-monitor/icon.png"))
       .when(w?.buttons, el => el.child(button("minimize", w.platform === "windows" ? svg("mods/tabs/win-min.svg").size(16) : "−", () => run("window.minimize")))
         .child(button("maximize", w.platform === "windows" ? svg(`mods/tabs/${w.maximized ? "win-restore" : "win-max"}.svg`).size(16) : "□", () => run("window.maximize")))
         .child(button("close-window", w.platform === "windows" ? svg("mods/tabs/win-close.svg").size(16) : svg("mods/pane/close.svg").size(13), () => run("window.close"))));

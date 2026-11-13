@@ -169,6 +169,13 @@
                       "content": {
                         "mod": "calendar"
                       }
+                    },
+                    {
+                      "id": "pr-monitor",
+                      "type": "block",
+                      "content": {
+                        "mod": "pr-monitor"
+                      }
                     }
                   ],
                   "active": "files"
