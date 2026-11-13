@@ -22,7 +22,7 @@ case "$direction" in
   *) echo "Unknown sync direction: $direction" >&2; exit 2 ;;
 esac
 
-mods=(jj-changes jj-log jj-spaces my-agents)
+mods=(jj-changes jj-log jj-spaces my-agents my-tabs calendar)
 files=(layouts/jj-main.json keys.json settings.json)
 
 # Check every source before changing anything at the destination.
@@ -39,7 +39,7 @@ for file in "${files[@]}"; do
   fi
 done
 
-mod_options=(-rltc --delete --exclude=gpui-kit.d.ts --exclude=.DS_Store --exclude='*.error')
+mod_options=(-rltc --delete --exclude=gpui-kit.d.ts --exclude=node_modules --exclude=.DS_Store --exclude='*.error')
 file_options=(-ltc)
 if "$dry_run"; then
   mod_options+=(--dry-run --itemize-changes)
@@ -64,3 +64,7 @@ for file in "${files[@]}"; do
     printf '%s file: %s\n' "$([[ $dry_run == true ]] && echo 'Checked' || echo 'Synced')" "$file"
   fi
 done
+
+if [[ "$direction" == to && "$dry_run" == false ]]; then
+  npm ci --prefix "$destination_dir/mods/calendar" --omit=dev
+fi

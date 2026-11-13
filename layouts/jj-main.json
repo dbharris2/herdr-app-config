@@ -79,7 +79,7 @@
           "id": "tabs",
           "type": "block",
           "content": {
-            "mod": "tabs"
+            "mod": "my-tabs"
           },
           "size": {
             "px": 42
@@ -162,6 +162,13 @@
                           }
                         }
                       ]
+                    },
+                    {
+                      "id": "calendar",
+                      "type": "block",
+                      "content": {
+                        "mod": "calendar"
+                      }
                     }
                   ],
                   "active": "files"
@@ -182,7 +189,10 @@
           "id": "status",
           "type": "block",
           "content": {
-            "mod": "workspace-status"
+            "mod": "calendar",
+            "props": {
+              "status": true
+            }
           },
           "size": {
             "px": 28
