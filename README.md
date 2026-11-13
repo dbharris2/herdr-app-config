@@ -1,7 +1,7 @@
 # Herdr App configuration
 
 Personal Herdr App layout, mods, keybindings, and settings. The `jj-main`
-layout uses `jj-changes`, `jj-log`, `jj-spaces`, `my-agents`, `my-tabs`, and `calendar` alongside
+layout uses `jj-changes`, `jj-log`, `jj-spaces`, `my-agents`, `my-tabs`, `calendar`, and `pr-monitor` alongside
 Herdr's shipped mods. The Jujutsu panels require `jj` on Herdr's PATH.
 
 ## Sync
@@ -37,3 +37,5 @@ The Calendar panel reads a Google Calendar secret iCal feed. Click Link calendar
 and paste the address into the secure prompt; macOS Keychain stores it outside
 this repository. The panel shows the current workweek and refreshes every five
 minutes. Node.js and npm are required; sync-to installs the calendar parser.
+
+The Pull requests panel uses the authenticated GitHub CLI (`gh`) and refreshes every five minutes.
