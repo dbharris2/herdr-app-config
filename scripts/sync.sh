@@ -39,6 +39,24 @@ for file in "${files[@]}"; do
   fi
 done
 
+# A person's live zoom is local to their screen. Prepare the merged settings
+# before syncing anything, so invalid JSON cannot leave a partial sync.
+settings_source="$source_dir/settings.json"
+if [[ "$direction" == to && -f "$destination_dir/settings.json" ]]; then
+  settings_tmp="$(mktemp -d)"
+  trap 'rm -rf "$settings_tmp"' EXIT
+  node - "$settings_source" "$destination_dir/settings.json" "$settings_tmp/settings.json" <<'NODE'
+const fs = require("fs");
+const [source, destination, output] = process.argv.slice(2);
+const settings = JSON.parse(fs.readFileSync(source, "utf8"));
+const live = JSON.parse(fs.readFileSync(destination, "utf8"));
+if (Object.hasOwn(live, "zoom")) settings.zoom = live.zoom;
+else delete settings.zoom;
+fs.writeFileSync(output, JSON.stringify(settings, null, 2) + "\n");
+NODE
+  settings_source="$settings_tmp/settings.json"
+fi
+
 mod_options=(-rltc --delete --exclude=gpui-kit.d.ts --exclude=node_modules --exclude=.DS_Store --exclude='*.error')
 file_options=(-ltc)
 if "$dry_run"; then
@@ -60,7 +78,9 @@ for file in "${files[@]}"; do
   if "$dry_run" && [[ ! -d "$(dirname "$destination_dir/$file")" ]]; then
     printf 'Would create file: %s\n' "$file"
   else
-    rsync "${file_options[@]}" "$source_dir/$file" "$destination_dir/$file"
+    file_source="$source_dir/$file"
+    if [[ "$file" == settings.json ]]; then file_source="$settings_source"; fi
+    rsync "${file_options[@]}" "$file_source" "$destination_dir/$file"
     printf '%s file: %s\n' "$([[ $dry_run == true ]] && echo 'Checked' || echo 'Synced')" "$file"
   fi
 done

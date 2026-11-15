@@ -21,7 +21,9 @@ mirrors the mod directories. Files removed from a source mod are deleted
 from the matching destination mod; other layouts, mods, and files are left
 alone. The scripts exclude Herdr's generated `gpui-kit.d.ts`, `.DS_Store`, and
 mod error files, and preserve those excluded files at the destination. A sync
-overwrites differences in the chosen direction. Review `jj diff` before
+overwrites differences in the chosen direction. When syncing to Herdr, the live
+zoom setting is preserved; on a new installation the repository default is used.
+Review `jj diff` before
 syncing from Herdr if the repo contains edits you want to keep.
 
 Herdr reloads changes live. After syncing to Herdr, check the mods with
