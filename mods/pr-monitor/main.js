@@ -1,15 +1,15 @@
-import { View, div, svg } from "gpui-kit";
+import { View, div, svg, image } from "gpui-kit";
 import { v_flex, h_flex } from "gpui-base";
-import { exec, theme, setShared } from "herdr";
+import { exec, theme, shared, setShared } from "herdr";
 
 const searches = ["is:pr is:open -is:draft review-requested:@me", "is:pr is:open author:@me", "is:pr is:open -is:draft reviewed-by:@me -author:@me"];
-const query = q => `{ search(query: ${JSON.stringify(q)}, type: ISSUE, first: 50) { nodes { ... on PullRequest { id number title url isDraft updatedAt repository { nameWithOwner } author { login avatarUrl(size: 64) } reviewRequests(first: 100) { nodes { requestedReviewer { __typename ... on User { login avatarUrl(size: 64) } ... on Team { slug name avatarUrl(size: 64) } } } } reviewDecision mergeStateStatus additions deletions changedFiles files(first: 100) { nodes { path additions deletions } pageInfo { hasNextPage endCursor } } reviews(last: 100) { nodes { state submittedAt author { login avatarUrl(size: 64) } } } } } } }`;
+const query = q => `{ search(query: ${JSON.stringify(q)}, type: ISSUE, first: 50) { nodes { ... on PullRequest { id number title url isDraft updatedAt headRefName headRepository { nameWithOwner } repository { nameWithOwner } author { login avatarUrl(size: 64) } reviewRequests(first: 100) { nodes { requestedReviewer { __typename ... on User { login avatarUrl(size: 64) } ... on Team { slug name avatarUrl(size: 64) } } } } reviewDecision mergeStateStatus stack { size } stackEntry { position } additions deletions changedFiles files(first: 100) { nodes { path additions deletions } pageInfo { hasNextPage endCursor } } reviews(last: 100) { nodes { state submittedAt author { login avatarUrl(size: 64) } } } } } } }`;
 
 function approved(pr) {
   const latest = new Map();
   for (const review of pr.reviews?.nodes ?? []) {
     const login = review.author?.login;
-    if (!login) continue;
+    if (!login || review.state === "COMMENTED" || review.state === "PENDING") continue;
     const previous = latest.get(login);
     if (!previous || !review.submittedAt || !previous.submittedAt || review.submittedAt > previous.submittedAt) latest.set(login, review);
   }
@@ -103,8 +103,8 @@ function avatarGroup(people, t) {
 }
 function statusColor(pr, t) {
   if (pr.isDraft) return t.dim;
-  if (pr.reviewDecision === "CHANGES_REQUESTED") return t.ansi1;
-  if (pr.reviewDecision === "APPROVED" || approved(pr)) return t.ansi2;
+  if (pr.reviewDecision === "CHANGES_REQUESTED") return "#ff5f57";
+  if (pr.reviewDecision === "APPROVED" || approved(pr)) return "#34d058";
   return "#f78166";
 }
 function age(date) {
@@ -120,6 +120,7 @@ export default class PRMonitor extends View {
       try {
         this.sections = await fetchSections(true); this.error = null;
         setShared("pr-monitor.counts", { review: this.sections["Needs my review"].length, changes: this.sections["Changes requested"].length, approved: this.sections.Approved.length });
+        setShared("pr-monitor.branches", Object.values(this.sections).flat().filter(pr => pr.headRepository?.nameWithOwner && pr.headRefName).map(pr => ({ repo: pr.headRepository.nameWithOwner.toLowerCase(), branch: pr.headRefName, number: pr.number, url: pr.url })));
         const prs = Object.values(this.sections).flat();
         await Promise.all(prs.map(async pr => {
           try { pr.implementation = await implementation(pr); }
@@ -136,6 +137,7 @@ export default class PRMonitor extends View {
       .child(h_flex().h(38).px(12).items_center().justify_between().border_b(1).border_color(t.border)
         .child(div().font_semibold().text_size(13).child("Pull requests"))
         .child(h_flex().items_center().gap(5)
+          .child(div().id("pr-destination").px(8).py(5).rounded(6).text_size(12).text_color(t.muted).hover(s => s.bg(t.hover)).tooltip(`Opening in ${shared("pr-monitor.destination") === "linear" ? "Linear" : "GitHub"}; click to switch`).on_click((_e, cx) => { setShared("pr-monitor.destination", shared("pr-monitor.destination") === "linear" ? "github" : "linear"); cx.notify(); }).child(shared("pr-monitor.destination") === "linear" ? image("mods/pr-monitor/linear.png").size(14) : svg("mods/pr-monitor/github.svg").size(14)))
           .child(div().id("pr-line-mode").px(8).py(5).rounded(6).text_size(12).text_color(t.muted).hover(s => s.bg(t.hover)).tooltip(`Showing ${this.showTotal ? "all" : "implementation"} line counts. Click to switch.`).on_click((_e, cx) => { this.showTotal = !this.showTotal; localStorage.setItem("pr-monitor.showTotal", String(this.showTotal)); cx.notify(); }).child(this.showTotal ? "All" : "Impl"))
           .child(div().id("refresh-prs").px(8).py(5).rounded(6).text_size(12).text_color(t.muted).hover(s => s.bg(t.hover)).on_click((_e, cx) => this.refresh(cx)).child(this.loading ? "Refreshing…" : "Refresh"))))
       .child(v_flex().id("pr-list").flex_1().min_h(0).overflow_y_scrollbar().p(8).gap(6)
@@ -145,7 +147,7 @@ export default class PRMonitor extends View {
         .children(Object.entries(this.sections ?? {}).filter(([, prs]) => prs.length).map(([name, prs]) => v_flex().gap(2)
           .child(h_flex().id(`section-${name}`).px(4).py(5).items_center().justify_between().rounded(5).hover(s => s.bg(t.hover)).on_click((_e, cx) => { if (this.folded.has(name)) this.folded.delete(name); else this.folded.add(name); cx.notify(); })
             .child(h_flex().items_center().gap(6).child(svg(`mods/workspace-chrome/chevron-${this.folded.has(name) ? "right" : "down"}.svg`).size(11).flex_none().text_color(t.muted)).child(div().font_semibold().text_size(13).child(name))).child(div().text_size(11).text_color(t.muted).child(String(prs.length))))
-          .when(!this.folded.has(name), el => el.children(prs.map(pr => v_flex().id(pr.id).px(8).py(6).gap(3).rounded(5).border_l(3).border_color(statusColor(pr, t)).hover(s => s.bg(t.hover)).on_click(() => { exec("/usr/bin/open", [pr.url]); })
+          .when(!this.folded.has(name), el => el.children(prs.map(pr => v_flex().id(pr.id).px(8).py(6).gap(3).rounded(5).border_l(3).border_color(statusColor(pr, t)).hover(s => s.bg(t.hover)).on_click((_e, cx) => { cx.open_url(shared("pr-monitor.destination") === "linear" ? pr.url.replace(/^https:\/\/github\.com\//, "https://linear.review/") : pr.url); })
             .child(h_flex().gap(8).items_center()
               .when(Boolean(pr.author?.avatarUrl), el => el.child(avatar(pr.author, 28)))
               .child(div().flex_1().min_w(0).text_size(12).child(pr.title)))
@@ -156,7 +158,8 @@ export default class PRMonitor extends View {
                 .child(div().flex_none().text_color(t.blocked).child(this.showTotal ? `−${pr.deletions}` : pr.implementation ? `−${pr.implementation.del}` : pr.implementationError ? "—" : "…"))
                 .when(!this.showTotal && pr.implementation?.excluded, el => el.child(div().flex_none().text_color(t.muted).child("*")))
                 .child(h_flex().flex_none().items_center().gap(3).child(svg("mods/files/file.svg").size(12).flex_none()).child(div().child(String(pr.changedFiles))))
-                .child(div().flex_none().child(age(pr.updatedAt))))
+                .child(div().flex_none().child(age(pr.updatedAt)))
+                .when(Boolean(pr.stack && pr.stackEntry), el => el.child(h_flex().flex_none().items_center().gap(3).text_color(t.muted).tooltip("Position in GitHub stack").child(svg("mods/pr-monitor/stack.svg").size(12).flex_none()).child(div().child(`${pr.stackEntry.position}/${pr.stack.size}`)))))
               .when(reviewers(pr).length > 0, el => el.child(avatarGroup(reviewers(pr), t))))
             .when(pr.mergeStateStatus === "DIRTY", el => el.child(div().text_size(11).text_color(t.blocked).child("Merge conflict")))))))));
   }

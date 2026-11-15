@@ -1,6 +1,6 @@
 import { View, div } from "gpui-kit";
 import { v_flex, h_flex } from "gpui-base";
-import { spaces, panes, focused, exec, watchFolder, theme, settings } from "herdr";
+import { spaces, panes, focused, exec, watchFolder, theme, settings, shared } from "herdr";
 
 function location() {
   const space = spaces().find(s => s.active), f = focused();
@@ -34,7 +34,7 @@ function parseAnsi(text) {
 }
 export default class JjLog extends View {
   init(_props, cx) {
-    this.lines = []; this.context = null; this.loading = false; this.pending = false;
+    this.lines = []; this.changes = []; this.repositories = []; this.context = null; this.loading = false; this.pending = false;
     this.refresh(cx, true);
     cx.timer.every(30000, cx => this.refresh(cx, true));
   }
@@ -54,7 +54,7 @@ export default class JjLog extends View {
   }
   refresh(cx, snapshot = false) {
     const context = key(), { cwd, on } = location();
-    if (context !== this.context) { this.context = context; this.lines = []; this.error = null; this.watched = null; snapshot = true; }
+    if (context !== this.context) { this.context = context; this.lines = []; this.changes = []; this.repositories = []; this.error = null; this.watched = null; snapshot = true; }
     if (!cwd) return;
     if (this.loading) { this.pending = true; this.pendingSnapshot ||= snapshot; return; }
     this.loading = true;
@@ -68,7 +68,16 @@ export default class JjLog extends View {
         const r = await exec("jj", args, { cwd: root, on });
         if (key() !== context) return;
         if (r.code !== 0) { this.lines = []; this.error = (r.stderr || "Cannot read Jujutsu log").trim(); }
-        else { this.lines = parseAnsi(r.stdout); this.error = null; }
+        else {
+          this.lines = parseAnsi(r.stdout); this.error = null;
+          const [changes, remotes] = await Promise.all([
+            exec("jj", ["--ignore-working-copy", "--no-pager", "log", "--no-graph", "-T", 'json({"change" => change_id.short(), "bookmarks" => bookmarks.map(|b| b.name())}) ++ "\\n"'], { cwd: root, on }),
+            exec("git", ["--no-optional-locks", "config", "--get-regexp", "^remote\\..*\\.url$"], { cwd: root, on }),
+          ]);
+          if (key() !== context) return;
+          this.changes = changes.code === 0 ? changes.stdout.split("\n").filter(Boolean).map(line => JSON.parse(line)) : [];
+          this.repositories = (remotes.stdout ?? "").split("\n").map(line => /(?:https?:\/\/github\.com\/|git@github\.com:|ssh:\/\/git@github\.com\/)([\w.-]+\/[\w.-]+?)(?:\.git)?\/?$/.exec(line)?.[1]?.toLowerCase()).filter(Boolean);
+        }
       } catch (e) { if (key() === context) this.error = String(e); }
       finally {
         this.loading = false; cx.notify();
@@ -79,9 +88,20 @@ export default class JjLog extends View {
   render(cx) {
     if (key() !== this.context) this.refresh(cx, true);
     const t = theme();
+    const prs = shared("pr-monitor.branches") ?? [];
+    const byChange = new Map();
+    for (const change of this.changes) {
+      const matches = prs.filter(pr => this.repositories.includes(pr.repo) && change.bookmarks.includes(pr.branch));
+      if (matches.length) byChange.set(change.change, matches);
+    }
     return v_flex().id("jj-log").size_full().min_h(0).rounded(10).overflow_hidden().bg(t.background).border_1().border_color(t.border).text_color(t.foreground)
       .child(h_flex().h(38).flex_none().px(14).items_center().border_b(1).border_color(t.border).text_size(13).font_semibold().child("Jujutsu log"))
       .child(div().id("jj-log-scroll").flex_1().min_h(0).overflow_y_scrollbar().p(10).font_family(settings().font_family ?? "JetBrains Mono").text_size(11)
-        .children(this.error ? [div().text_color(t.dim).child(this.error)] : this.lines.map((line, i) => h_flex().id(`jj-log-${i}`).whitespace_nowrap().children(line.length ? line.map(span => div().whitespace_nowrap().text_color(typeof span.color === "number" ? ansiColor(span.color, t) : span.color || (span.dim ? t.dim : t.foreground)).when(span.bold, e => e.font_bold()).child(span.text)) : [div().child(" ")]))));
+        .children(this.error ? [div().text_color(t.dim).child(this.error)] : this.lines.map((line, i) => {
+          const text = line.map(span => span.text).join("");
+          const change = this.changes.find(c => new RegExp(`(?:^|\\s)${c.change.slice(0, 8)}[a-z]*\\b`).test(text));
+          return h_flex().id(`jj-log-${i}`).whitespace_nowrap().children(line.length ? line.map(span => div().whitespace_nowrap().text_color(typeof span.color === "number" ? ansiColor(span.color, t) : span.color || (span.dim ? t.dim : t.foreground)).when(span.bold, e => e.font_bold()).child(span.text)) : [div().child(" ")])
+            .children((byChange.get(change?.change) ?? []).map(pr => div().id(`pr-${i}-${pr.number}`).ml(8).text_color(t.accent).cursor_pointer().tooltip(`Open pull request in ${shared("pr-monitor.destination") === "linear" ? "Linear" : "GitHub"}`).on_click((_e, cx) => { cx.stop_propagation(); cx.open_url(shared("pr-monitor.destination") === "linear" ? pr.url.replace(/^https:\/\/github\.com\//, "https://linear.review/") : pr.url); }).child(`#${pr.number}`)));
+        })));
   }
 }

@@ -3,13 +3,13 @@ import { h_flex, ScrollHandle } from "gpui-base";
 import { spaces, panes, run, openOverlay, theme, window, shared, setShared, layout, settings, exec } from "herdr";
 
 const searches = ["is:pr is:open -is:draft review-requested:@me", "is:pr is:open author:@me", "is:pr is:open -is:draft reviewed-by:@me -author:@me"];
-const query = q => `{ search(query: ${JSON.stringify(q)}, type: ISSUE, first: 50) { nodes { ... on PullRequest { id number title url isDraft updatedAt repository { nameWithOwner } author { login avatarUrl(size: 64) } reviewRequests(first: 100) { nodes { requestedReviewer { __typename ... on User { login avatarUrl(size: 64) } ... on Team { slug name avatarUrl(size: 64) } } } } reviewDecision mergeStateStatus additions deletions changedFiles reviews(last: 100) { nodes { state submittedAt author { login avatarUrl(size: 64) } } } } } } }`;
+const query = q => `{ search(query: ${JSON.stringify(q)}, type: ISSUE, first: 50) { nodes { ... on PullRequest { id number title url isDraft updatedAt headRefName headRepository { nameWithOwner } repository { nameWithOwner } author { login avatarUrl(size: 64) } reviewRequests(first: 100) { nodes { requestedReviewer { __typename ... on User { login avatarUrl(size: 64) } ... on Team { slug name avatarUrl(size: 64) } } } } reviewDecision mergeStateStatus additions deletions changedFiles reviews(last: 100) { nodes { state submittedAt author { login avatarUrl(size: 64) } } } } } } }`;
 
 function approved(pr) {
   const latest = new Map();
   for (const review of pr.reviews?.nodes ?? []) {
     const login = review.author?.login;
-    if (!login) continue;
+    if (!login || review.state === "COMMENTED" || review.state === "PENDING") continue;
     const previous = latest.get(login);
     if (!previous || !review.submittedAt || !previous.submittedAt || review.submittedAt > previous.submittedAt) latest.set(login, review);
   }
@@ -70,6 +70,7 @@ export default class Tabs extends View {
       try {
         const sections = await fetchSections();
         setShared("pr-monitor.counts", { review: sections["Needs my review"].length, changes: sections["Changes requested"].length, approved: sections.Approved.length });
+        setShared("pr-monitor.branches", Object.values(sections).flat().filter(pr => pr.headRepository?.nameWithOwner && pr.headRefName).map(pr => ({ repo: pr.headRepository.nameWithOwner.toLowerCase(), branch: pr.headRefName, number: pr.number, url: pr.url })));
         cx.notify();
       } catch { /* Keep the last successful counts. */ }
     });
@@ -154,10 +155,10 @@ export default class Tabs extends View {
         .on_click(() => {
           if (on) run("layout.hide", { id: "panel" });
           else { run("layout.select", { stack: "panel-body", child: id }); run("layout.show", { id: "panel" }); }
-        }).child(id === "pr-monitor" ? image(icon).size(14) : svg(icon).size(14)).child(label)
+        }).child(id === "files" ? svg(icon).size(14) : image(icon).size(id === "pr-monitor" ? 14 : 16)).child(label)
         .when(id === "pr-monitor" && Boolean(shared("pr-monitor.counts")), el => {
           const counts = shared("pr-monitor.counts");
-          return el.children([[counts.review, "#f78166"], [counts.changes, t.ansi1], [counts.approved, t.ansi2]]
+          return el.children([[counts.review, "#f78166"], [counts.changes, "#ff5f57"], [counts.approved, "#34d058"]]
             .filter(([count]) => count > 0).map(([count, color]) => div().text_size(11).font_semibold().text_color(color).child(count > 99 ? "99+" : String(count))));
         });
     };
@@ -169,8 +170,8 @@ export default class Tabs extends View {
         .children(shown.map(item)))
       .child(button("tab-new", "+", () => openOverlay({ mod: "new-menu", kind: "popup", width: 250, height: 512 })))
       .when(enabled.includes("files"), el => el.child(panelButton("files", "Files", "mods/files/file.svg")))
-      .when(enabled.includes("changes"), el => el.child(panelButton("changes", "Changes", "mods/changes/changes.svg")))
-      .child(panelButton("calendar", "Calendar", "mods/workspace-chrome/clock.svg"))
+      .when(enabled.includes("changes"), el => el.child(panelButton("changes", "Changes", "mods/my-tabs/jj-icon.png")))
+      .child(panelButton("calendar", "Calendar", "mods/my-tabs/calendar-icon.png"))
       .child(panelButton("pr-monitor", "Pull requests", "mods/pr-monitor/icon.png"))
       .when(w?.buttons, el => el.child(button("minimize", w.platform === "windows" ? svg("mods/tabs/win-min.svg").size(16) : "−", () => run("window.minimize")))
         .child(button("maximize", w.platform === "windows" ? svg(`mods/tabs/${w.maximized ? "win-restore" : "win-max"}.svg`).size(16) : "□", () => run("window.maximize")))

@@ -1,5 +1,5 @@
-import { View, div } from "gpui-kit";
-import { v_flex, h_flex, InputState, Input, Scrollbar, v_virtual_list } from "gpui-base";
+import { View, div, list } from "gpui-kit";
+import { v_flex, h_flex, InputState, Input, Scrollbar } from "gpui-base";
 import { spaces, panes, focused, exec, readTextFile, watchFolder, theme, settings } from "herdr";
 
 function location() {
@@ -11,6 +11,7 @@ function location() {
 const key = () => JSON.stringify(location());
 // Reads write nothing under .git (no index refresh or lock, no fsmonitor cookie):
 // the folder watch would see it, and every refresh would start the next one.
+const DIFF_ADD = "#34d058", DIFF_DELETE = "#ff5f57";
 const READ = ["--no-optional-locks", "-c", "core.fsmonitor=false", "-c", "diff.autoRefreshIndex=false"];
 const countLines = (text) => text ? text.split("\n").length - Number(text.endsWith("\n")) : 0;
 
@@ -40,7 +41,7 @@ function diffRows(lines) {
 
 export default class Changes extends View {
   init(_props, cx) {
-    this.files = []; this.rows = []; this.totals = null; this.diffWidth = 0; this.message = ""; this.handle = cx.focus_handle();
+    this.files = []; this.rows = []; this.totals = null; this.message = ""; this.handle = cx.focus_handle();
     this.showTotal = localStorage.getItem("changes.showTotal") === "true";
     this.sectionOpen = {};
     this.input = InputState.new({ placeholder: "Change description" });
@@ -137,7 +138,6 @@ export default class Changes extends View {
 
   setLines(lines) {
     this.rows = diffRows(lines);
-    this.diffWidth = Math.max(300, ...lines.map(line => line.length * 7 + 50));
   }
 
   pick(path, cx) {
@@ -168,10 +168,10 @@ export default class Changes extends View {
   }
 
   diffRow({ kind, number, text }, t) {
-    if (kind === "@") return div().w_full().px(12).h(20).flex_none().truncate().bg(t.raised).text_color(t.dim).child(text);
-    return h_flex().w_full().h(20).flex_none().gap(10).when(kind === "+", (e) => e.bg(t.ansi2 + "18")).when(kind === "-", (e) => e.bg(t.ansi1 + "18"))
+    if (kind === "@") return div().w_full().px(12).min_h(20).flex_none().whitespace_normal().bg(t.raised).text_color(t.dim).child(text);
+    return h_flex().w_full().min_h(20).flex_none().gap(10).when(kind === "+", (e) => e.bg(DIFF_ADD + "30")).when(kind === "-", (e) => e.bg(DIFF_DELETE + "30"))
       .child(div().w(30).flex_none().text_right().text_color(t.dim).child(number === undefined ? "" : String(number)))
-      .child(div().flex_1().min_w(0).truncate().child(text));
+      .child(div().flex_1().min_w(0).whitespace_normal().child(text));
   }
 
   render(cx) {
@@ -196,8 +196,8 @@ export default class Changes extends View {
           .tooltip(`${breakdown}\nClick to show ${this.showTotal ? "implementation" : "total"} line counts`)
           .on_click((_e, cx) => { this.showTotal = !this.showTotal; localStorage.setItem("changes.showTotal", String(this.showTotal)); cx.notify(); })
           .child(div().text_size(10).text_color(t.muted).child(this.showTotal ? "All" : "Impl"))
-          .child(div().text_size(11).text_color(t.ansi2).child(`+${count.add}`))
-          .child(div().text_size(11).text_color(t.ansi1).child(`−${count.del}`))
+          .child(div().text_size(11).text_color(DIFF_ADD).child(`+${count.add}`))
+          .child(div().text_size(11).text_color(DIFF_DELETE).child(`−${count.del}`))
           .when(!this.showTotal && filtered, e => e.child(div().text_size(11).text_color(t.muted).child("*"))))))
       .child(v_flex().id("changes-list").flex_none().h(Math.min(200, Math.max(44, listHeight))).overflow_y_scrollbar().p(6).border_b(1).border_color(t.border).children(groups.flatMap(group => {
         const open = groupOpen(group.name), stats = this.totals?.[group.name];
@@ -207,24 +207,23 @@ export default class Changes extends View {
           .child(div().text_size(11).text_color(t.foreground).child(group.name))
           .child(div().text_size(11).text_color(t.dim).child(String(this.groupCounts?.[group.name] ?? group.files.length)))
           .child(div().flex_1())
-          .when(Boolean(stats), e => e.child(div().text_size(11).text_color(t.ansi2).child(`+${stats.add}`)).child(div().text_size(11).text_color(t.ansi1).child(`−${stats.del}`)));
+          .when(Boolean(stats), e => e.child(div().text_size(11).text_color(DIFF_ADD).child(`+${stats.add}`)).child(div().text_size(11).text_color(DIFF_DELETE).child(`−${stats.del}`)));
         const rows = open ? group.files.map((f) => {
         const parts = f.path.split("/"), name = parts.pop();
         return h_flex().id(`change-${f.path}`).h(28).flex_none().px(8).gap(8).items_center().rounded(7).cursor_pointer().when(this.open === f.path, (e) => e.bg(t.selected)).hover((s) => s.bg(t.hover)).on_click((_e, cx) => this.pick(f.path, cx))
-          .child(div().w(14).text_size(11).text_color(f.status === "A" ? t.ansi2 : f.status === "D" ? t.ansi1 : f.status === "U" ? t.ansi1 : t.blocked).child(f.status))
+          .child(div().w(14).text_size(11).text_color(f.status === "A" ? DIFF_ADD : f.status === "D" ? DIFF_DELETE : f.status === "U" ? DIFF_DELETE : t.blocked).child(f.status))
           .child(h_flex().flex_1().min_w(0).child(div().text_color(t.dim).truncate().child(parts.length ? parts.join("/") + "/" : "")).child(div().max_w(260).min_w(0).truncate().child(name)))
-          .when(f.add > 0, (e) => e.child(div().flex_none().text_size(11).text_color(t.ansi2).child(`+${f.add}`))).when(f.del > 0, (e) => e.child(div().flex_none().text_size(11).text_color(t.ansi1).child(`−${f.del}`)));
+          .when(f.add > 0, (e) => e.child(div().flex_none().text_size(11).text_color(DIFF_ADD).child(`+${f.add}`))).when(f.del > 0, (e) => e.child(div().flex_none().text_size(11).text_color(DIFF_DELETE).child(`−${f.del}`)));
         }) : [];
         return [header, ...rows];
       })).when(!this.files.length, (e) => e.child(div().p(8).text_color(t.dim).child(this.error || (this.loading ? "Loading changes…" : this.root ? "No changes in the working copy" : "No folder")))))
       .when(this.limited, el => el.child(div().px(12).py(4).text_size(11).text_color(t.dim).child("Showing the first 1,000 changed files")))
       .child(div().flex_1().min_h(0).relative().font_family(settings().font_family ?? "JetBrains Mono").text_size(11)
-        .child(div().id("changes-diff-x").size_full().overflow_x_scrollbar()
-          .child(div().w_full().min_w(this.diffWidth).h_full().child(v_virtual_list("changes-diff", this.rows.length, 20, (i) => String(i),
-            (range) => this.rows.slice(range.start, range.end).map((row) => this.diffRow(row, t))).size_full())))
+        .child(list("changes-diff", this.rows.length, (i) => String(i),
+          (i) => this.diffRow(this.rows[i], t)).size_full())
         .child(Scrollbar.vertical("changes-diff").viewport_from_layout().absolute().inset_0())
         .when(!this.open && this.files.length > 0, (e) => e.child(div().absolute().top(6).px(12).text_color(t.dim).child("Select a file to view its changes"))))
-      .when(Boolean(this.note), (e) => e.child(div().px(10).pb(8).text_size(11).text_color(t.ansi1).child(this.note)))
+      .when(Boolean(this.note), (e) => e.child(div().px(10).pb(8).text_size(11).text_color(DIFF_DELETE).child(this.note)))
       .child(h_flex().flex_none().p(10).gap(8).border_t(1).border_color(t.border)
         .child(div().id("commit-message").flex_1().min_w(0).h(32).px(10).flex().items_center().rounded(8).border_1().border_color(this.typing ? t.accent : t.border).cursor_text().on_mouse_down("left", (_e, cx) => cx.stop_propagation()).child(Input.new(this.input).h_full().text_size(12).text_color(t.foreground)))
         .child(div().id("commit").h(32).px(14).flex().items_center().rounded(8).bg(enabled ? t.solid : t.raised).text_color(enabled ? t.solid_foreground : t.dim).text_size(12).when(enabled, (e) => e.cursor_pointer()).on_click((_e, cx) => this.commit(cx)).child(this.busy ? "Committing…" : "Commit")));
