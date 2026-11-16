@@ -1,6 +1,6 @@
 import { View, div, list } from "gpui-kit";
 import { v_flex, h_flex, InputState, Input, Scrollbar } from "gpui-base";
-import { spaces, panes, focused, exec, readTextFile, watchFolder, theme, settings } from "herdr";
+import { spaces, panes, focused, exec, readTextFile, watchFolder, theme, settings, setShared } from "herdr";
 
 function location() {
   const space = spaces().find((s) => s.active), f = focused();
@@ -42,7 +42,7 @@ function diffRows(lines) {
 export default class Changes extends View {
   init(_props, cx) {
     this.files = []; this.rows = []; this.totals = null; this.message = ""; this.handle = cx.focus_handle();
-    this.showTotal = localStorage.getItem("changes.showTotal") === "true";
+    this.showTotal = localStorage.getItem("changes.showTotal") === "true"; setShared("changes.showTotal", this.showTotal);
     this.sectionOpen = {};
     this.input = InputState.new({ placeholder: "Change description" });
     this.input.on("change", (_e, cx) => {
@@ -194,7 +194,7 @@ export default class Changes extends View {
         .child(div().flex_1())
         .when(Boolean(count), el => el.child(h_flex().id("changes-line-count").gap(5).items_center().cursor_pointer().rounded(4).hover(s => s.bg(t.hover))
           .tooltip(`${breakdown}\nClick to show ${this.showTotal ? "implementation" : "total"} line counts`)
-          .on_click((_e, cx) => { this.showTotal = !this.showTotal; localStorage.setItem("changes.showTotal", String(this.showTotal)); cx.notify(); })
+          .on_click((_e, cx) => { this.showTotal = !this.showTotal; localStorage.setItem("changes.showTotal", String(this.showTotal)); setShared("changes.showTotal", this.showTotal); cx.notify(); })
           .child(div().text_size(10).text_color(t.muted).child(this.showTotal ? "All" : "Impl"))
           .child(div().text_size(11).text_color(DIFF_ADD).child(`+${count.add}`))
           .child(div().text_size(11).text_color(DIFF_DELETE).child(`−${count.del}`))
