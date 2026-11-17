@@ -1,9 +1,9 @@
 import { View, div, svg, image } from "gpui-kit";
-import { v_flex, h_flex } from "gpui-base";
+import { v_flex, h_flex, InputState, Input } from "gpui-base";
 import { exec, theme, shared, setShared } from "herdr";
 
 const searches = ["is:pr is:open -is:draft review-requested:@me", "is:pr is:open author:@me", "is:pr is:open -is:draft reviewed-by:@me -author:@me"];
-const query = q => `{ search(query: ${JSON.stringify(q)}, type: ISSUE, first: 50) { nodes { ... on PullRequest { id number title url isDraft updatedAt headRefName headRepository { nameWithOwner } repository { nameWithOwner } author { login avatarUrl(size: 64) } reviewRequests(first: 100) { nodes { requestedReviewer { __typename ... on User { login avatarUrl(size: 64) } ... on Team { slug name avatarUrl(size: 64) } } } } reviewDecision mergeStateStatus stack { size } stackEntry { position } additions deletions changedFiles files(first: 100) { nodes { path additions deletions } pageInfo { hasNextPage endCursor } } reviews(last: 100) { nodes { state submittedAt author { login avatarUrl(size: 64) } } } } } } }`;
+const query = q => `{ viewer { login } search(query: ${JSON.stringify(q)}, type: ISSUE, first: 50) { nodes { ... on PullRequest { id number title url isDraft updatedAt headRefName headRepository { nameWithOwner } repository { nameWithOwner } author { login avatarUrl(size: 64) } reviewRequests(first: 100) { nodes { requestedReviewer { __typename ... on User { login avatarUrl(size: 64) } ... on Team { slug name avatarUrl(size: 64) } } } } reviewDecision mergeStateStatus stack { size } stackEntry { position } additions deletions changedFiles files(first: 100) { nodes { path additions deletions } pageInfo { hasNextPage endCursor } } reviews(last: 100) { nodes { state submittedAt author { __typename login avatarUrl(size: 64) } } } } } } }`;
 
 function approved(pr) {
   const latest = new Map();
@@ -68,7 +68,7 @@ export async function fetchSections(force = false) {
       const data = JSON.parse(r.stdout);
       if (data.errors?.length) throw new Error(data.errors[0].message);
       if (!data.data?.search?.nodes) throw new Error("Unexpected response from GitHub.");
-      return data.data.search.nodes.filter(pr => pr.id);
+      return data.data.search.nodes.filter(pr => pr.id).map(pr => ({ ...pr, viewerLogin: data.data.viewer?.login }));
     }));
     cached = group(results); fetchedAt = Date.now();
     return cached;
@@ -79,11 +79,11 @@ function reviewers(pr) {
   const people = new Map();
   for (const request of pr.reviewRequests?.nodes ?? []) {
     const person = request.requestedReviewer;
-    if (person?.avatarUrl) people.set(`${person.__typename}:${person.login ?? person.slug}`, person);
+    if (person?.avatarUrl && person.__typename !== "Bot") people.set(`${person.__typename}:${person.login ?? person.slug}`, person);
   }
   for (const review of pr.reviews?.nodes ?? []) {
     const person = review.author;
-    if (person?.avatarUrl && !people.has(`User:${person.login}`)) people.set(`User:${person.login}`, person);
+    if (person?.avatarUrl && person.__typename !== "Bot" && !people.has(`User:${person.login}`)) people.set(`User:${person.login}`, person);
   }
   return [...people.values()];
 }
@@ -92,7 +92,7 @@ function avatar(person, size) {
   const name = person.login ?? person.slug ?? person.name ?? "?";
   let hash = 0;
   for (const char of name.toLowerCase()) hash = (Math.imul(hash, 31) + char.codePointAt(0)) >>> 0;
-  return h_flex().size(size).rounded(size * 0.28).flex_none().bg(AVATAR_COLORS[hash % AVATAR_COLORS.length]).items_center().justify_center().text_size(size > 20 ? 12 : 9).font_bold().text_color("#ffffff").child([...name][0]?.toUpperCase() ?? "?");
+  return h_flex().size(size).rounded(person.__typename === "Team" ? size * 0.28 : size / 2).flex_none().bg(AVATAR_COLORS[hash % AVATAR_COLORS.length]).items_center().justify_center().text_size(size > 20 ? 12 : 9).font_bold().text_color("#ffffff").child([...name][0]?.toUpperCase() ?? "?");
 }
 function avatarGroup(people, t) {
   const shown = people.slice(0, 5);
@@ -112,7 +112,11 @@ function age(date) {
   return minutes < 60 ? `${minutes}m` : minutes < 1440 ? `${Math.floor(minutes / 60)}h` : `${Math.floor(minutes / 1440)}d`;
 }
 export default class PRMonitor extends View {
-  init(_props, cx) { this.sections = null; this.loading = false; this.error = null; this.folded = new Set(); this.showTotal = localStorage.getItem("pr-monitor.showTotal") === "true"; this.refresh(cx); cx.timer.every(300000, cx => this.refresh(cx)); }
+  init(_props, cx) { this.sections = null; this.menu = null; this.busy = false; this.actionError = null; this.editing = false; this.editingGroup = null;
+    try { this.groups = JSON.parse(localStorage.getItem("pr-monitor.reviewerGroups") || "[]"); if (!Array.isArray(this.groups)) this.groups = []; } catch { this.groups = []; }
+    this.groupName = InputState.new({ placeholder: "Group name" });
+    this.groupUsers = InputState.new({ placeholder: "GitHub usernames, comma separated" });
+    this.loading = false; this.error = null; this.folded = new Set(); this.showTotal = localStorage.getItem("pr-monitor.showTotal") === "true"; this.refresh(cx); cx.timer.every(300000, cx => this.refresh(cx)); }
   refresh(cx) {
     if (this.loading) return;
     this.loading = true; cx.notify();
@@ -128,8 +132,36 @@ export default class PRMonitor extends View {
           cx.notify();
         }));
       } catch (e) { this.error = String(e); }
-      finally { this.loading = false; cx.notify(); }
+      finally { this.loading = false; cx.notify(); if (this.refreshAfterAction) { this.refreshAfterAction = false; this.refresh(cx); } }
     });
+  }
+  saveGroup(cx) {
+    const name = this.groupName.value().trim();
+    const users = [...new Map(this.groupUsers.value().split(/[\s,]+/).map(s => s.replace(/^@/, "").trim()).filter(Boolean).map(s => [s.toLowerCase(), s])).values()];
+    if (!name || !users.length) { this.actionError = "Enter a group name and at least one GitHub username."; cx.notify(); return; }
+    this.groups = this.groups.filter(g => g.name !== this.editingGroup && g.name.toLowerCase() !== name.toLowerCase());
+    this.groups.push({ name, users }); this.groups.sort((a, b) => a.name.localeCompare(b.name));
+    localStorage.setItem("pr-monitor.reviewerGroups", JSON.stringify(this.groups));
+    this.groupName.set_value(""); this.groupUsers.set_value(""); this.editing = false; this.editingGroup = null; this.actionError = null; cx.notify();
+  }
+  action(pr, args, cx) {
+    if (this.busy) return;
+    this.busy = true; this.menu = null; this.actionError = null; cx.notify();
+    cx.spawn(async cx => {
+      try {
+        const r = await exec("gh", args, { timeout: 30000 });
+        if (r.code !== 0) throw new Error(r.stderr || "GitHub action failed");
+      } catch (e) { this.actionError = `#${pr.number}: ${String(e)}`; }
+      finally { this.busy = false; cx.notify(); if (this.loading) this.refreshAfterAction = true; else this.refresh(cx); }
+    });
+  }
+  actionMenu(pr, t) {
+    const button = (id, label, fn) => div().id(id).px(8).py(5).rounded(5).text_size(12).hover(s => s.bg(t.hover)).on_click((e, cx) => { cx.stop_propagation(); fn(cx); }).child(label);
+    return v_flex().p(6).gap(2).rounded(6).border_1().border_color(t.border).bg(t.background)
+      .when(Boolean(pr.viewerLogin && pr.author?.login === pr.viewerLogin), el => el.child(button(`draft-${pr.id}`, pr.isDraft ? "Mark ready for review" : "Convert to draft", cx => this.action(pr, ["pr", "ready", String(pr.number), "--repo", pr.repository.nameWithOwner, ...(pr.isDraft ? [] : ["--undo"])], cx))))
+      .children((pr.reviewRequests?.nodes?.length ? [] : this.groups).map((g, i) => button(`review-${pr.id}-${i}`, `Request ${g.name}`, cx => this.action(pr, ["api", "--method", "POST", `repos/${pr.repository.nameWithOwner}/pulls/${pr.number}/requested_reviewers`, ...g.users.flatMap(u => ["-f", `reviewers[]=${u}`])], cx))))
+      .when(!pr.reviewRequests?.nodes?.length && !this.groups.length, el => el.child(button(`setup-groups-${pr.id}`, "Set up reviewer groups…", cx => { this.menu = null; this.editing = true; cx.notify(); })))
+      .child(button(`close-menu-${pr.id}`, "Cancel", cx => { this.menu = null; cx.notify(); }));
   }
   render(cx) {
     const t = theme();
@@ -139,18 +171,28 @@ export default class PRMonitor extends View {
         .child(h_flex().items_center().gap(5)
           .child(div().id("pr-destination").px(8).py(5).rounded(6).text_size(12).text_color(t.muted).hover(s => s.bg(t.hover)).tooltip(`Opening in ${shared("pr-monitor.destination") === "linear" ? "Linear" : "GitHub"}; click to switch`).on_click((_e, cx) => { setShared("pr-monitor.destination", shared("pr-monitor.destination") === "linear" ? "github" : "linear"); cx.notify(); }).child(shared("pr-monitor.destination") === "linear" ? image("mods/pr-monitor/linear.png").size(14) : svg("mods/pr-monitor/github.svg").size(14)))
           .child(div().id("pr-line-mode").px(8).py(5).rounded(6).text_size(12).text_color(t.muted).hover(s => s.bg(t.hover)).tooltip(`Showing ${this.showTotal ? "all" : "implementation"} line counts. Click to switch.`).on_click((_e, cx) => { this.showTotal = !this.showTotal; localStorage.setItem("pr-monitor.showTotal", String(this.showTotal)); cx.notify(); }).child(this.showTotal ? "All" : "Impl"))
+          .child(div().id("reviewer-groups").px(8).py(5).rounded(6).text_size(12).text_color(t.muted).hover(s => s.bg(t.hover)).on_click((_e, cx) => { this.editing = !this.editing; this.menu = null; cx.notify(); }).child("Groups"))
           .child(div().id("refresh-prs").px(8).py(5).rounded(6).text_size(12).text_color(t.muted).hover(s => s.bg(t.hover)).on_click((_e, cx) => this.refresh(cx)).child(this.loading ? "Refreshing…" : "Refresh"))))
+      .when(this.editing, el => el.child(v_flex().p(8).gap(6).border_1().border_color(t.border).rounded(6)
+          .child(div().text_size(12).child("Reviewer groups (GitHub usernames)"))
+          .children(this.groups.map((g, i) => h_flex().gap(6).items_center().child(div().flex_1().text_size(12).child(`${g.name}: ${g.users.join(", ")}`)).child(div().id(`edit-group-${i}`).text_size(12).on_click((_e, cx) => { this.editingGroup = g.name; this.groupName.set_value(g.name); this.groupUsers.set_value(g.users.join(", ")); cx.notify(); }).child("Edit")).child(div().id(`delete-group-${i}`).text_size(12).on_click((_e, cx) => { this.groups.splice(i, 1); localStorage.setItem("pr-monitor.reviewerGroups", JSON.stringify(this.groups)); cx.notify(); }).child("Delete"))))
+          .child(div().h(30).px(6).border_1().border_color(t.border).child(Input.new(this.groupName).h_full().text_size(12)))
+          .child(div().h(30).px(6).border_1().border_color(t.border).child(Input.new(this.groupUsers).h_full().text_size(12)))
+          .child(div().id("save-group").p(5).text_size(12).hover(s => s.bg(t.hover)).on_click((_e, cx) => this.saveGroup(cx)).child("Save group"))))
       .child(v_flex().id("pr-list").flex_1().min_h(0).overflow_y_scrollbar().p(8).gap(6)
+        .when(Boolean(this.actionError), el => el.child(div().p(4).text_size(12).text_color(t.blocked).child(this.actionError)))
+        .when(this.busy, el => el.child(div().p(4).text_size(12).text_color(t.muted).child("Updating pull request…")))
         .when(Boolean(this.error), el => el.child(div().p(4).text_size(12).text_color(t.blocked).child(this.error)))
         .when(!this.sections && !this.error, el => el.child(div().p(4).text_size(12).text_color(t.muted).child("Loading pull requests…")))
         .when(Boolean(this.sections) && !Object.values(this.sections ?? {}).some(list => list.length), el => el.child(div().p(4).text_size(12).text_color(t.muted).child("No open pull requests.")))
         .children(Object.entries(this.sections ?? {}).filter(([, prs]) => prs.length).map(([name, prs]) => v_flex().gap(2)
           .child(h_flex().id(`section-${name}`).px(4).py(5).items_center().justify_between().rounded(5).hover(s => s.bg(t.hover)).on_click((_e, cx) => { if (this.folded.has(name)) this.folded.delete(name); else this.folded.add(name); cx.notify(); })
             .child(h_flex().items_center().gap(6).child(svg(`mods/workspace-chrome/chevron-${this.folded.has(name) ? "right" : "down"}.svg`).size(11).flex_none().text_color(t.muted)).child(div().font_semibold().text_size(13).child(name))).child(div().text_size(11).text_color(t.muted).child(String(prs.length))))
-          .when(!this.folded.has(name), el => el.children(prs.map(pr => v_flex().id(pr.id).px(8).py(6).gap(3).rounded(5).border_l(3).border_color(statusColor(pr, t)).hover(s => s.bg(t.hover)).on_click((_e, cx) => { cx.open_url(shared("pr-monitor.destination") === "linear" ? pr.url.replace(/^https:\/\/github\.com\//, "https://linear.review/") : pr.url); })
+          .when(!this.folded.has(name), el => el.children(prs.map(pr => v_flex().id(pr.id).px(8).py(6).gap(3).rounded(5).border_l(3).border_color(statusColor(pr, t)).hover(s => s.bg(t.hover)).on_mouse_down("right", (_e, cx) => { cx.stop_propagation(); if (!pr.viewerLogin || pr.author?.login !== pr.viewerLogin) return; this.menu = this.menu === pr.id ? null : pr.id; cx.notify(); }).on_click((_e, cx) => { cx.open_url(shared("pr-monitor.destination") === "linear" ? pr.url.replace(/^https:\/\/github\.com\//, "https://linear.review/") : pr.url); })
             .child(h_flex().gap(8).items_center()
               .when(Boolean(pr.author?.avatarUrl), el => el.child(avatar(pr.author, 28)))
-              .child(div().flex_1().min_w(0).text_size(12).child(pr.title)))
+              .child(div().flex_1().min_w(0).text_size(12).child(pr.title))
+              .child(div().flex_none().text_size(11).text_color(t.muted).child(age(pr.updatedAt))))
             .child(h_flex().items_center().gap(6).text_size(11).text_color(t.muted)
               .child(h_flex().flex_1().min_w(0).items_center().gap(6)
                 .child(div().min_w(0).truncate().child(`${pr.repository.nameWithOwner.split("/").pop()} #${pr.number}`))
@@ -158,9 +200,9 @@ export default class PRMonitor extends View {
                 .child(div().flex_none().text_color(t.blocked).child(this.showTotal ? `−${pr.deletions}` : pr.implementation ? `−${pr.implementation.del}` : pr.implementationError ? "—" : "…"))
                 .when(!this.showTotal && pr.implementation?.excluded, el => el.child(div().flex_none().text_color(t.muted).child("*")))
                 .child(h_flex().flex_none().items_center().gap(3).child(svg("mods/files/file.svg").size(12).flex_none()).child(div().child(String(pr.changedFiles))))
-                .child(div().flex_none().child(age(pr.updatedAt)))
                 .when(Boolean(pr.stack && pr.stackEntry), el => el.child(h_flex().flex_none().items_center().gap(3).text_color(t.muted).tooltip("Position in GitHub stack").child(svg("mods/pr-monitor/stack.svg").size(12).flex_none()).child(div().child(`${pr.stackEntry.position}/${pr.stack.size}`)))))
               .when(reviewers(pr).length > 0, el => el.child(avatarGroup(reviewers(pr), t))))
+            .when(this.menu === pr.id && !this.busy, el => el.child(this.actionMenu(pr, t)))
             .when(pr.mergeStateStatus === "DIRTY", el => el.child(div().text_size(11).text_color(t.blocked).child("Merge conflict")))))))));
   }
 }
