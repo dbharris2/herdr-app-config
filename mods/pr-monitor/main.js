@@ -3,7 +3,7 @@ import { v_flex, h_flex, InputState, Input } from "gpui-base";
 import { exec, theme, shared, setShared } from "herdr";
 
 const searches = ["is:pr is:open -is:draft review-requested:@me", "is:pr is:open author:@me", "is:pr is:open -is:draft reviewed-by:@me -author:@me"];
-const query = q => `{ viewer { login } search(query: ${JSON.stringify(q)}, type: ISSUE, first: 50) { nodes { ... on PullRequest { id number title url isDraft updatedAt headRefName headRepository { nameWithOwner } repository { nameWithOwner } author { login avatarUrl(size: 64) } reviewRequests(first: 100) { nodes { requestedReviewer { __typename ... on User { login avatarUrl(size: 64) } ... on Team { slug name avatarUrl(size: 64) } } } } reviewDecision mergeStateStatus stack { size } stackEntry { position } additions deletions changedFiles files(first: 100) { nodes { path additions deletions } pageInfo { hasNextPage endCursor } } reviews(last: 100) { nodes { state submittedAt author { __typename login avatarUrl(size: 64) } } } } } } }`;
+const query = q => `{ viewer { login } search(query: ${JSON.stringify(q)}, type: ISSUE, first: 50) { nodes { ... on PullRequest { id number title url isDraft updatedAt headRefName headRepository { nameWithOwner } repository { nameWithOwner } author { login avatarUrl(size: 64) } reviewRequests(first: 100) { nodes { requestedReviewer { __typename ... on User { login avatarUrl(size: 64) } ... on Team { slug name avatarUrl(size: 64) } } } } commits(last: 1) { nodes { commit { statusCheckRollup { state } } } } reviewDecision mergeStateStatus stack { size } stackEntry { position } additions deletions changedFiles files(first: 100) { nodes { path additions deletions } pageInfo { hasNextPage endCursor } } reviews(last: 100) { nodes { state submittedAt author { __typename login avatarUrl(size: 64) } } } } } } }`;
 
 function approved(pr) {
   const latest = new Map();
@@ -15,6 +15,8 @@ function approved(pr) {
   }
   return [...latest.values()].some(r => r.state === "APPROVED");
 }
+const sectionIcons = { "Needs my review": "code-review", "Changes requested": "file-diff", "Approved": "issue-closed", "Waiting for review": "git-pull-request", "Reviewed": "code-review", "Drafts": "git-pull-request" };
+const sectionColors = { "Approved": "#34d058", "Reviewed": "#ffab40", "Changes requested": "#ff5f57" };
 function group([requested, authored, reviewed]) {
   const sections = { "Needs my review": [], "Changes requested": [], "Approved": [], "Waiting for review": [], "Reviewed": [], "Drafts": [] };
   const changed = pr => pr.reviewDecision === "APPROVED" || pr.reviewDecision === "CHANGES_REQUESTED" || approved(pr);
@@ -74,6 +76,11 @@ export async function fetchSections(force = false) {
     return cached;
   })();
   try { return await pending; } finally { pending = null; }
+}
+function checks(pr) {
+  const state = pr.commits?.nodes?.[0]?.commit?.statusCheckRollup?.state;
+  if (!state) return null;
+  return { color: state === "SUCCESS" ? "#34d058" : state === "FAILURE" || state === "ERROR" ? "#ff5f57" : "#ffab40", label: `Checks: ${state.toLowerCase()}` };
 }
 function reviewers(pr) {
   const people = new Map();
@@ -187,7 +194,7 @@ export default class PRMonitor extends View {
         .when(Boolean(this.sections) && !Object.values(this.sections ?? {}).some(list => list.length), el => el.child(div().p(4).text_size(12).text_color(t.muted).child("No open pull requests.")))
         .children(Object.entries(this.sections ?? {}).filter(([, prs]) => prs.length).map(([name, prs]) => v_flex().gap(2)
           .child(h_flex().id(`section-${name}`).px(4).py(5).items_center().justify_between().rounded(5).hover(s => s.bg(t.hover)).on_click((_e, cx) => { if (this.folded.has(name)) this.folded.delete(name); else this.folded.add(name); cx.notify(); })
-            .child(h_flex().items_center().gap(6).child(svg(`mods/workspace-chrome/chevron-${this.folded.has(name) ? "right" : "down"}.svg`).size(11).flex_none().text_color(t.muted)).child(div().font_semibold().text_size(13).child(name))).child(div().text_size(11).text_color(t.muted).child(String(prs.length))))
+            .child(h_flex().items_center().gap(6).child(svg(`mods/workspace-chrome/chevron-${this.folded.has(name) ? "right" : "down"}.svg`).size(11).flex_none().text_color(t.muted)).child(svg(`mods/pr-monitor/${sectionIcons[name]}-16.svg`).size(14).flex_none().text_color(sectionColors[name] ?? t.muted)).child(div().font_semibold().text_size(13).child(name))).child(div().text_size(11).text_color(sectionColors[name] ?? t.muted).child(String(prs.length))))
           .when(!this.folded.has(name), el => el.children(prs.map(pr => v_flex().id(pr.id).px(8).py(6).gap(3).rounded(5).border_l(3).border_color(statusColor(pr, t)).hover(s => s.bg(t.hover)).on_mouse_down("right", (_e, cx) => { cx.stop_propagation(); if (!pr.viewerLogin || pr.author?.login !== pr.viewerLogin) return; this.menu = this.menu === pr.id ? null : pr.id; cx.notify(); }).on_click((_e, cx) => { cx.open_url(shared("pr-monitor.destination") === "linear" ? pr.url.replace(/^https:\/\/github\.com\//, "https://linear.review/") : pr.url); })
             .child(h_flex().gap(8).items_center()
               .when(Boolean(pr.author?.avatarUrl), el => el.child(avatar(pr.author, 28)))
@@ -201,6 +208,7 @@ export default class PRMonitor extends View {
                 .when(!this.showTotal && pr.implementation?.excluded, el => el.child(div().flex_none().text_color(t.muted).child("*")))
                 .child(h_flex().flex_none().items_center().gap(3).child(svg("mods/files/file.svg").size(12).flex_none()).child(div().child(String(pr.changedFiles))))
                 .when(Boolean(pr.stack && pr.stackEntry), el => el.child(h_flex().flex_none().items_center().gap(3).text_color(t.muted).tooltip("Position in GitHub stack").child(svg("mods/pr-monitor/stack.svg").size(12).flex_none()).child(div().child(`${pr.stackEntry.position}/${pr.stack.size}`)))))
+              .when(Boolean(checks(pr)), el => el.child(svg("mods/pr-monitor/beaker-16.svg").size(14).flex_none().text_color(checks(pr).color).tooltip(checks(pr).label)))
               .when(reviewers(pr).length > 0, el => el.child(avatarGroup(reviewers(pr), t))))
             .when(this.menu === pr.id && !this.busy, el => el.child(this.actionMenu(pr, t)))
             .when(pr.mergeStateStatus === "DIRTY", el => el.child(div().text_size(11).text_color(t.blocked).child("Merge conflict")))))))));
