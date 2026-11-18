@@ -208,9 +208,9 @@ export default class PRMonitor extends View {
                 .when(!this.showTotal && pr.implementation?.excluded, el => el.child(div().flex_none().text_color(t.muted).child("*")))
                 .child(h_flex().flex_none().items_center().gap(3).child(svg("mods/files/file.svg").size(12).flex_none()).child(div().child(String(pr.changedFiles))))
                 .when(Boolean(pr.stack && pr.stackEntry), el => el.child(h_flex().flex_none().items_center().gap(3).text_color(t.muted).tooltip("Position in GitHub stack").child(svg("mods/pr-monitor/stack.svg").size(12).flex_none()).child(div().child(`${pr.stackEntry.position}/${pr.stack.size}`)))))
+              .when(pr.mergeStateStatus === "DIRTY", el => el.child(svg("mods/pr-monitor/alert-16.svg").size(14).flex_none().text_color(t.blocked).tooltip("Merge conflict")))
               .when(Boolean(checks(pr)), el => el.child(svg("mods/pr-monitor/beaker-16.svg").size(14).flex_none().text_color(checks(pr).color).tooltip(checks(pr).label)))
               .when(reviewers(pr).length > 0, el => el.child(avatarGroup(reviewers(pr), t))))
-            .when(this.menu === pr.id && !this.busy, el => el.child(this.actionMenu(pr, t)))
-            .when(pr.mergeStateStatus === "DIRTY", el => el.child(div().text_size(11).text_color(t.blocked).child("Merge conflict")))))))));
+            .when(this.menu === pr.id && !this.busy, el => el.child(this.actionMenu(pr, t)))))))));
   }
 }
