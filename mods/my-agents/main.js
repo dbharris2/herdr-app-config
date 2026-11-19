@@ -516,7 +516,7 @@ export default class Agents extends View {
             .justify_between()
             .child(div().text_size(11.5).font_medium().text_color(t.dim).child("Agents"))
             .child(div().flex_1())
-            .child(div().id("agent-starter").size(26).flex_none().flex().items_center().justify_center().rounded(6).text_color(t.dim).hover(s => s.bg(t.hover).text_color(t.foreground)).tooltip("Start an agent").on_click(() => openOverlay({ mod: "agent-starter", kind: "dialog", width: 480, height: 390 })).child(svg("mods/workspace-chrome/plus.svg").size(14)))
+            .child(div().id("agent-starter").size(26).flex_none().flex().items_center().justify_center().rounded(6).text_color(t.dim).hover(s => s.bg(t.hover).text_color(t.foreground)).tooltip("Start an agent").on_click(() => openOverlay({ mod: "agent-starter", kind: "dialog", width: 560, height: 480 })).child(svg("mods/workspace-chrome/plus.svg").size(14)))
             .child(
               div()
                 .id("ag-sort")

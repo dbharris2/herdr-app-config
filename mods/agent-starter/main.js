@@ -1,6 +1,6 @@
 import { View, div, image } from "gpui-kit";
 import { v_flex, h_flex, InputState, Input } from "gpui-base";
-import { theme, pickFolder, run, closeOverlay, props, spaces, panes, shared, setShared } from "herdr";
+import { theme, pickFolder, run, closeOverlay, props, spaces, panes, shared, setShared, home } from "herdr";
 
 const name = path => path.replace(/\/+$/, "").split("/").pop() || path;
 export default class AgentStarter extends View {
@@ -41,6 +41,8 @@ export default class AgentStarter extends View {
     const t = theme();
     const paths = [...new Set([...this.favorites, ...this.recent, ...this.localSpaces().map(s => s.folder).filter(Boolean)])];
     const icons = shared("agent-repo-icons") ?? {};
+    const homeDir = home().replace(/\/$/, "");
+    const displayPath = path => path === homeDir ? "~" : path.startsWith(homeDir + "/") ? "~" + path.slice(homeDir.length) : path;
     const button = (id, label, action) => div().id(id).px(10).py(6).rounded(6).bg(t.raised).cursor_pointer().hover(e => e.bg(t.hover)).on_click(action).child(label);
     return v_flex().id("agent-starter").size_full().p(18).gap(10).bg(t.popover).text_color(t.foreground).text_size(13)
       .child(h_flex().items_center().gap(8).child(div().flex_1().text_size(16).font_semibold().child("Start an agent"))
@@ -54,7 +56,7 @@ export default class AgentStarter extends View {
         .when(!paths.length, e => e.child(div().py(16).text_color(t.dim).child("Add a folder to get started.")))
         .children(paths.map((path, i) => h_flex().id(`repo-${i}`).p(10).gap(8).items_center().rounded(8).border_1().border_color(t.border)
           .when(Boolean(icons[path]), el => el.child(image(icons[path]).size(28).flex_none().rounded(5)))
-          .child(v_flex().flex_1().min_w(0).gap(2).child(div().font_semibold().truncate().child(name(path))).child(div().text_size(11).text_color(t.dim).truncate().tooltip(path).child(path)))
+          .child(v_flex().flex_1().min_w(0).gap(2).child(div().font_semibold().truncate().child(name(path))).child(div().text_size(11).text_color(t.dim).truncate().tooltip(path).child(displayPath(path))))
           .child(button(`favorite-${i}`, this.favorites.includes(path) ? "★" : "☆", (_e, cx) => { this.favorites = this.favorites.includes(path) ? this.favorites.filter(p => p !== path) : [...this.favorites, path]; setShared("agent-starter.favorites", this.favorites); cx.notify(); }))
           .child(button(`codex-${i}`, h_flex().gap(6).items_center().child(image("icons/codex.svg").size(16)).child("Codex"), () => this.launch(path, "codex")))
           .child(button(`claude-${i}`, h_flex().gap(6).items_center().child(image("icons/claude.svg").size(16)).child("Claude"), () => this.launch(path, "claude"))))));

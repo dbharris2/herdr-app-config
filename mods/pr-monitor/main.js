@@ -15,8 +15,8 @@ function approved(pr) {
   }
   return [...latest.values()].some(r => r.state === "APPROVED");
 }
-const sectionIcons = { "Needs my review": "code-review", "Changes requested": "file-diff", "Approved": "issue-closed", "Waiting for review": "git-pull-request", "Reviewed": "code-review", "Drafts": "git-pull-request" };
-const sectionColors = { "Approved": "#34d058", "Reviewed": "#ffab40", "Changes requested": "#ff5f57" };
+const sectionIcons = { "Needs my review": "code-review", "Changes requested": "file-diff", "Approved": "issue-closed", "Waiting for review": "hourglass", "Reviewed": "comment-discussion", "Drafts": "git-pull-request-draft" };
+const sectionColors = { "Needs my review": "#ffab40", "Approved": "#34d058", "Reviewed": "#b392f0", "Waiting for review": "#58a6ff", "Changes requested": "#ff5f57" };
 function group([requested, authored, reviewed]) {
   const sections = { "Needs my review": [], "Changes requested": [], "Approved": [], "Waiting for review": [], "Reviewed": [], "Drafts": [] };
   const changed = pr => pr.reviewDecision === "APPROVED" || pr.reviewDecision === "CHANGES_REQUESTED" || approved(pr);
