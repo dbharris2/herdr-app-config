@@ -26,26 +26,43 @@
           "type": "column",
           "children": [
             {
-              "id": "spaces",
+              "id": "sidebar-tabs",
               "type": "block",
               "content": {
-                "mod": "jj-spaces"
+                "mod": "sidebar-tabs"
               },
               "size": {
-                "weight": 1
-              },
-              "min": 90
+                "px": 35
+              }
             },
             {
-              "id": "agents",
-              "type": "block",
-              "content": {
-                "mod": "my-agents"
-              },
-              "size": {
-                "weight": 1
-              },
-              "min": 90
+              "id": "sidebar-views",
+              "type": "stack",
+              "active": "agents",
+              "children": [
+                {
+                  "id": "spaces",
+                  "type": "block",
+                  "content": {
+                    "mod": "jj-spaces"
+                  },
+                  "size": {
+                    "weight": 1
+                  },
+                  "min": 90
+                },
+                {
+                  "id": "agents",
+                  "type": "block",
+                  "content": {
+                    "mod": "my-agents"
+                  },
+                  "size": {
+                    "weight": 1
+                  },
+                  "min": 90
+                }
+              ]
             }
           ]
         },

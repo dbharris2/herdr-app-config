@@ -1,6 +1,6 @@
 import { View, div, svg, image } from "gpui-kit";
 import { v_flex, h_flex, InputState, Input } from "gpui-base";
-import { exec, theme, shared, setShared } from "herdr";
+import { exec, theme, shared, setShared, appHome, checking } from "herdr";
 
 const searches = ["is:pr is:open -is:draft review-requested:@me", "is:pr is:open author:@me", "is:pr is:open -is:draft reviewed-by:@me -author:@me"];
 const query = q => `{ viewer { login } search(query: ${JSON.stringify(q)}, type: ISSUE, first: 50) { nodes { ... on PullRequest { id number title url isDraft updatedAt headRefName headRepository { nameWithOwner } repository { nameWithOwner } author { login avatarUrl(size: 64) } reviewRequests(first: 100) { nodes { requestedReviewer { __typename ... on User { login avatarUrl(size: 64) } ... on Team { slug name avatarUrl(size: 64) } } } } commits(last: 1) { nodes { commit { statusCheckRollup { state } } } } reviewDecision mergeStateStatus stack { size } stackEntry { position } additions deletions changedFiles files(first: 100) { nodes { path additions deletions } pageInfo { hasNextPage endCursor } } reviews(last: 100) { nodes { state submittedAt author { __typename login avatarUrl(size: 64) } } } } } } }`;
@@ -94,9 +94,41 @@ function reviewers(pr) {
   }
   return [...people.values()];
 }
+// URL-derived filenames keep changed GitHub avatars separate from older cached images.
+const avatarPaths = new Map();
+function avatarFile(url) {
+  let hash = 2166136261;
+  for (const ch of url) hash = Math.imul(hash ^ ch.codePointAt(0), 16777619) >>> 0;
+  return `pr-avatars/${hash.toString(16)}-${url.length}.img`;
+}
+async function cacheAvatars(prs, cx) {
+  if (checking()) return;
+  const people = prs.flatMap(pr => [pr.author, ...reviewers(pr)]).filter(p => p?.avatarUrl);
+  const urls = [...new Set(people.map(p => p.avatarUrl))].filter(url => /^https:\/\//i.test(url) && !avatarPaths.has(url));
+  if (!urls.length) return;
+  const dir = `${appHome()}/pr-avatars`;
+  const made = await exec("mkdir", ["-p", dir]);
+  if (made.code !== 0) return;
+  await Promise.all(urls.map(async url => {
+    const relative = avatarFile(url), path = `${appHome()}/${relative}`;
+    try {
+      const exists = await exec("test", ["-s", path]);
+      if (exists.code !== 0) {
+        const temporary = `${path}.${Date.now()}.${Math.random().toString(36).slice(2)}.tmp`;
+        const download = await exec("curl", ["--fail", "--silent", "--show-error", "--location", "--max-time", "20", "--max-filesize", "1048576", "--output", temporary, url]);
+        if (download.code !== 0) { await exec("rm", ["-f", temporary]); return; }
+        const move = await exec("mv", [temporary, path]);
+        if (move.code !== 0) return;
+      }
+      avatarPaths.set(url, relative); cx.notify();
+    } catch { /* Keep the initials if an avatar cannot be cached. */ }
+  }));
+}
 const AVATAR_COLORS = ["#22a99a", "#e3814f", "#5b8def", "#8b7cf6", "#3fae6a", "#d9649a"];
 function avatar(person, size) {
   const name = person.login ?? person.slug ?? person.name ?? "?";
+  const path = avatarPaths.get(person.avatarUrl);
+  if (path) return image(path).size(size).flex_none().rounded(person.__typename === "Team" ? size * 0.28 : size / 2);
   let hash = 0;
   for (const char of name.toLowerCase()) hash = (Math.imul(hash, 31) + char.codePointAt(0)) >>> 0;
   return h_flex().size(size).rounded(person.__typename === "Team" ? size * 0.28 : size / 2).flex_none().bg(AVATAR_COLORS[hash % AVATAR_COLORS.length]).items_center().justify_center().text_size(size > 20 ? 12 : 9).font_bold().text_color("#ffffff").child([...name][0]?.toUpperCase() ?? "?");
@@ -122,7 +154,7 @@ export default class PRMonitor extends View {
   init(_props, cx) { this.sections = null; this.menu = null; this.busy = false; this.actionError = null; this.editing = false; this.editingGroup = null;
     try { this.groups = JSON.parse(localStorage.getItem("pr-monitor.reviewerGroups") || "[]"); if (!Array.isArray(this.groups)) this.groups = []; } catch { this.groups = []; }
     this.groupName = InputState.new({ placeholder: "Group name" });
-    this.groupUsers = InputState.new({ placeholder: "GitHub usernames, comma separated" });
+    this.groupUsers = InputState.new({ placeholder: "Users or org/team, comma separated" });
     this.loading = false; this.error = null; this.folded = new Set(); this.showTotal = localStorage.getItem("pr-monitor.showTotal") === "true"; this.refresh(cx); cx.timer.every(300000, cx => this.refresh(cx)); }
   refresh(cx) {
     if (this.loading) return;
@@ -133,11 +165,11 @@ export default class PRMonitor extends View {
         setShared("pr-monitor.counts", { review: this.sections["Needs my review"].length, changes: this.sections["Changes requested"].length, approved: this.sections.Approved.length });
         setShared("pr-monitor.branches", Object.values(this.sections).flat().filter(pr => pr.headRepository?.nameWithOwner && pr.headRefName).map(pr => ({ repo: pr.headRepository.nameWithOwner.toLowerCase(), branch: pr.headRefName, number: pr.number, url: pr.url })));
         const prs = Object.values(this.sections).flat();
-        await Promise.all(prs.map(async pr => {
+        await Promise.all([cacheAvatars(prs, cx), Promise.all(prs.map(async pr => {
           try { pr.implementation = await implementation(pr); }
           catch { pr.implementationError = true; }
           cx.notify();
-        }));
+        }))]);
       } catch (e) { this.error = String(e); }
       finally { this.loading = false; cx.notify(); if (this.refreshAfterAction) { this.refreshAfterAction = false; this.refresh(cx); } }
     });
@@ -145,7 +177,8 @@ export default class PRMonitor extends View {
   saveGroup(cx) {
     const name = this.groupName.value().trim();
     const users = [...new Map(this.groupUsers.value().split(/[\s,]+/).map(s => s.replace(/^@/, "").trim()).filter(Boolean).map(s => [s.toLowerCase(), s])).values()];
-    if (!name || !users.length) { this.actionError = "Enter a group name and at least one GitHub username."; cx.notify(); return; }
+    if (!name || !users.length) { this.actionError = "Enter a group name and at least one username or org/team."; cx.notify(); return; }
+    if (users.some(u => !/^[a-z0-9-]+(?:\/[a-z0-9][a-z0-9_-]*)?$/i.test(u))) { this.actionError = "Use GitHub usernames or organization/team-slug entries."; cx.notify(); return; }
     this.groups = this.groups.filter(g => g.name !== this.editingGroup && g.name.toLowerCase() !== name.toLowerCase());
     this.groups.push({ name, users }); this.groups.sort((a, b) => a.name.localeCompare(b.name));
     localStorage.setItem("pr-monitor.reviewerGroups", JSON.stringify(this.groups));
@@ -162,11 +195,18 @@ export default class PRMonitor extends View {
       finally { this.busy = false; cx.notify(); if (this.loading) this.refreshAfterAction = true; else this.refresh(cx); }
     });
   }
+  requestGroup(pr, group, cx) {
+    const owner = pr.repository.nameWithOwner.split("/")[0];
+    const wrong = group.users.find(entry => entry.includes("/") && entry.split("/")[0].toLowerCase() !== owner.toLowerCase());
+    if (wrong) { this.menu = null; this.actionError = `#${pr.number}: ${wrong} belongs to a different organization than ${owner}.`; cx.notify(); return; }
+    const fields = group.users.flatMap(entry => entry.includes("/") ? ["-f", `team_reviewers[]=${entry.split("/")[1]}`] : ["-f", `reviewers[]=${entry}`]);
+    this.action(pr, ["api", "--method", "POST", `repos/${pr.repository.nameWithOwner}/pulls/${pr.number}/requested_reviewers`, ...fields], cx);
+  }
   actionMenu(pr, t) {
     const button = (id, label, fn) => div().id(id).px(8).py(5).rounded(5).text_size(12).hover(s => s.bg(t.hover)).on_click((e, cx) => { cx.stop_propagation(); fn(cx); }).child(label);
     return v_flex().p(6).gap(2).rounded(6).border_1().border_color(t.border).bg(t.background)
       .when(Boolean(pr.viewerLogin && pr.author?.login === pr.viewerLogin), el => el.child(button(`draft-${pr.id}`, pr.isDraft ? "Mark ready for review" : "Convert to draft", cx => this.action(pr, ["pr", "ready", String(pr.number), "--repo", pr.repository.nameWithOwner, ...(pr.isDraft ? [] : ["--undo"])], cx))))
-      .children((pr.reviewRequests?.nodes?.length ? [] : this.groups).map((g, i) => button(`review-${pr.id}-${i}`, `Request ${g.name}`, cx => this.action(pr, ["api", "--method", "POST", `repos/${pr.repository.nameWithOwner}/pulls/${pr.number}/requested_reviewers`, ...g.users.flatMap(u => ["-f", `reviewers[]=${u}`])], cx))))
+      .children((pr.reviewRequests?.nodes?.length ? [] : this.groups).map((g, i) => button(`review-${pr.id}-${i}`, `Request ${g.name}`, cx => this.requestGroup(pr, g, cx))))
       .when(!pr.reviewRequests?.nodes?.length && !this.groups.length, el => el.child(button(`setup-groups-${pr.id}`, "Set up reviewer groups…", cx => { this.menu = null; this.editing = true; cx.notify(); })))
       .child(button(`close-menu-${pr.id}`, "Cancel", cx => { this.menu = null; cx.notify(); }));
   }
@@ -181,7 +221,7 @@ export default class PRMonitor extends View {
           .child(div().id("reviewer-groups").px(8).py(5).rounded(6).text_size(12).text_color(t.muted).hover(s => s.bg(t.hover)).on_click((_e, cx) => { this.editing = !this.editing; this.menu = null; cx.notify(); }).child("Groups"))
           .child(div().id("refresh-prs").px(8).py(5).rounded(6).text_size(12).text_color(t.muted).hover(s => s.bg(t.hover)).on_click((_e, cx) => this.refresh(cx)).child(this.loading ? "Refreshing…" : "Refresh"))))
       .when(this.editing, el => el.child(v_flex().p(8).gap(6).border_1().border_color(t.border).rounded(6)
-          .child(div().text_size(12).child("Reviewer groups (GitHub usernames)"))
+          .child(div().text_size(12).child("Reviewer groups (usernames or org/team-slug)"))
           .children(this.groups.map((g, i) => h_flex().gap(6).items_center().child(div().flex_1().text_size(12).child(`${g.name}: ${g.users.join(", ")}`)).child(div().id(`edit-group-${i}`).text_size(12).on_click((_e, cx) => { this.editingGroup = g.name; this.groupName.set_value(g.name); this.groupUsers.set_value(g.users.join(", ")); cx.notify(); }).child("Edit")).child(div().id(`delete-group-${i}`).text_size(12).on_click((_e, cx) => { this.groups.splice(i, 1); localStorage.setItem("pr-monitor.reviewerGroups", JSON.stringify(this.groups)); cx.notify(); }).child("Delete"))))
           .child(div().h(30).px(6).border_1().border_color(t.border).child(Input.new(this.groupName).h_full().text_size(12)))
           .child(div().h(30).px(6).border_1().border_color(t.border).child(Input.new(this.groupUsers).h_full().text_size(12)))

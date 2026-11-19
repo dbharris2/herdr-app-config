@@ -3,7 +3,7 @@
 
 import { View, div, image, svg } from "gpui-kit";
 import { v_flex, h_flex } from "gpui-base";
-import { agents, terminals, panes, focused, spaces, home, run, theme, shared, setShared, setAgentOrder, openOverlay, closeOverlay, props, window, layout } from "herdr";
+import { agents, terminals, panes, focused, spaces, home, run, theme, shared, setShared, setAgentOrder, openOverlay, closeOverlay, props, window, layout, exec, appHome, notify } from "herdr";
 
 function find(node, id) {
   if (node?.id === id) return node;
@@ -70,13 +70,41 @@ function icon(p, size, color) {
 
 export default class Agents extends View {
   init(_props, cx) {
-    if (props()?.sortMenu) return;
+    if (props()?.sortMenu || props()?.repoMenu) return;
     this.folded = new Set();
+    this.jj = {};
+    this.refreshJj(cx);
+    cx.timer.every(10000, cx => this.refreshJj(cx));
     // Each agent's last state and when it changed (ms), kept across restarts.
     this.changed = JSON.parse(localStorage.getItem("changed") ?? "{}");
     this.titles = JSON.parse(localStorage.getItem("agent-titles") ?? "{}");
     this.pins = JSON.parse(localStorage.getItem("pins") ?? "[]");
     cx.timer.every(30000, (cx) => cx.notify());
+  }
+
+  refreshJj(cx) {
+    if (this.jjLoading) return;
+    this.jjLoading = true;
+    const ps = panes(), ss = spaces();
+    const locations = [...new Set(agents().map(a => {
+      const cwd = ps.find(p => p.pane === a.pane)?.cwd;
+      const on = ss.find(s => s.id === a.space)?.machine ?? null;
+      return cwd ? JSON.stringify([on, cwd]) : null;
+    }).filter(Boolean))];
+    cx.spawn(async cx => {
+      const entries = await Promise.all(locations.map(async key => {
+        const [on, cwd] = JSON.parse(key);
+        try {
+          const [workspace, description, root] = await Promise.all([
+            exec("jj", ["--ignore-working-copy", "workspace", "list", "-T", 'if(self.target().current_working_copy(), self.name(), "")'], { cwd, on }),
+            exec("jj", ["--ignore-working-copy", "--no-pager", "log", "-r", "@", "--no-graph", "-T", "description.first_line()"], { cwd, on }),
+            exec("jj", ["--ignore-working-copy", "root"], { cwd, on }),
+          ]);
+          return [key, workspace.code === 0 && description.code === 0 ? { workspace: workspace.stdout.trim(), description: description.stdout.trim(), root: root.code === 0 ? root.stdout.trim() : cwd } : null];
+        } catch { return [key, null]; }
+      }));
+      this.jj = Object.fromEntries(entries); this.jjLoading = false; cx.notify();
+    });
   }
 
   // Stamps agents whose state changed. Done and idle count as one: looking at a
@@ -127,6 +155,35 @@ export default class Agents extends View {
   rank(a) {
     const sawDone = a.address === this.held?.address && this.held.rank === RANK.done && a.status === "idle";
     return sawDone ? RANK.done : RANK[a.status] ?? 0;
+  }
+
+  repoMenu(t) {
+    const folder = props().folder;
+    const icons = shared("agent-repo-icons") ?? {};
+    const row = (id, label, action) => div().id(id).px(10).py(8).rounded(6).hover(e => e.bg(t.hover)).cursor_pointer().on_click(action).child(label);
+    return v_flex().p(5).bg(t.popover).text_size(13).text_color(t.foreground)
+      .child(row("choose-icon", "Choose repo icon…", (_e, cx) => {
+        const overlay = props().overlay;
+        cx.spawn(async cx => {
+          try {
+            const picked = await exec("osascript", ["-e", 'POSIX path of (choose file with prompt "Choose a repository icon" of type {"public.image"})']);
+            if (picked.code !== 0 || !picked.stdout.trim()) { if (picked.stderr && !picked.stderr.includes("-128")) throw new Error(picked.stderr); return; }
+            const source = picked.stdout.trim(), ext = source.split(".").pop().toLowerCase();
+            if (!["png", "jpg", "jpeg", "gif", "webp"].includes(ext)) throw new Error("Choose a PNG, JPEG, GIF, or WebP image.");
+            const dir = appHome() + "/repo-icons";
+            const made = await exec("mkdir", ["-p", dir]);
+            if (made.code !== 0) throw new Error(made.stderr);
+            const file = `${Date.now()}-${Math.random().toString(36).slice(2)}.${ext}`;
+            const copied = await exec("cp", [source, `${dir}/${file}`]);
+            if (copied.code !== 0) throw new Error(copied.stderr);
+            setShared("agent-repo-icons", { ...(shared("agent-repo-icons") ?? {}), [folder]: `repo-icons/${file}` });
+            closeOverlay(overlay);
+          } catch (e) { notify({ title: "Could not save repo icon", body: String(e), level: "error" }); }
+        });
+      }))
+      .when(Boolean(icons[folder]), el => el.child(row("remove-icon", "Remove repo icon", () => {
+        const next = { ...icons }; delete next[folder]; setShared("agent-repo-icons", next); closeOverlay(props().overlay);
+      })));
   }
 
   sortMenu(t) {
@@ -211,6 +268,7 @@ export default class Agents extends View {
   render(cx) {
     const t = theme();
     if (props()?.sortMenu) return this.sortMenu(t);
+    if (props()?.repoMenu) return this.repoMenu(t);
     const collapsed = narrow();
     const sort = sortOf();
     let list = agents();
@@ -286,6 +344,13 @@ export default class Agents extends View {
       if (collapsed) {
         return h_flex()
           .id(`ag-${a.address}`)
+        .on_mouse_down("right", (_e, cx) => {
+          cx.stop_propagation();
+          const cwd = panes().find(p => p.pane === a.pane)?.cwd;
+          const on = spaces().find(s => s.id === a.space)?.machine ?? null;
+          const root = cwd && this.jj[JSON.stringify([on, cwd])]?.root;
+          if (!on && cwd) openOverlay({ mod: "my-agents", kind: "popup", width: 200, height: 90, props: { repoMenu: true, folder: root || cwd } });
+        })
           .h(26)
           .px(8)
           .flex_none()
@@ -297,6 +362,7 @@ export default class Agents extends View {
           .child(h_flex().w(14).flex_none().items_center().justify_center().child(this.status(t, a, true)));
       }
       const cwd = panes().find(p => p.pane === a.pane)?.cwd;
+      const jj = cwd && this.jj[JSON.stringify([spaces().find(s => s.id === a.space)?.machine ?? null, cwd])];
       const homeDir = home().replace(/\/$/, "");
       const folder = cwd === homeDir ? "~" : cwd?.startsWith(homeDir + "/") ? "~" + cwd.slice(homeDir.length) : cwd;
       const when = this.since(a);
@@ -334,11 +400,20 @@ export default class Agents extends View {
         localStorage.setItem("agent-titles", JSON.stringify(this.titles));
       }
       const saved = this.titles[a.address]?.replace(/^action\s+required(?:\s*[.\u2026!]+)?\s*\|\s*/i, "");
-      const name = generic ? saved || fallback : task;
+      const agentTask = generic ? saved || fallback : task;
+      const name = agentTask;
       return h_flex()
         .id(`ag-${a.address}`)
+        .when(!byPriority && !isPinned, el => el.ml(14))
+        .on_mouse_down("right", (_e, cx) => {
+          cx.stop_propagation();
+          const cwd = panes().find(p => p.pane === a.pane)?.cwd;
+          const on = spaces().find(s => s.id === a.space)?.machine ?? null;
+          const root = cwd && this.jj[JSON.stringify([on, cwd])]?.root;
+          if (!on && cwd) openOverlay({ mod: "my-agents", kind: "popup", width: 200, height: 90, props: { repoMenu: true, folder: root || cwd } });
+        })
         .px(8)
-        .h(folder ? 44 : 30)
+        .h(jj ? 62 : folder ? 44 : 30)
         .flex_none()
         .rounded(8)
         .items_center()
@@ -362,7 +437,10 @@ export default class Agents extends View {
           .child(h_flex().min_w(0).gap(5).items_center()
             .child(div().flex_1().min_w(0).truncate().tooltip(name).text_color(a.status === "blocked" ? t.blocked : idle ? t.muted : t.foreground).child(name))
             .when(generic && !this.titles[a.address] && full && Boolean(more), el => el.child(div().flex_1().min_w(0).truncate().text_color(t.dim).child(`\u00b7 ${more}`))))
-          .when(Boolean(folder), el => el.child(div().min_w(0).truncate().text_size(11).text_color(t.dim).tooltip(cwd).child(folder))))
+          .when(Boolean((byPriority || isPinned) && folder || jj), el => el.child(h_flex().w_full().min_w(0).gap(6).text_size(11)
+            .when(Boolean(jj), el => el.child(div().flex_none().text_color(t.ansi4).child(jj.workspace)))
+            .when(Boolean((byPriority || isPinned) && folder), el => el.child(div().flex_1().min_w(0).text_right().truncate().text_color(t.dim).tooltip(cwd || "").child(folder || "")))))
+          .when(Boolean(jj), el => el.child(div().min_w(0).truncate().text_size(11).text_color(t.ansi5).tooltip(jj.description || "(no description)").child(jj.description || "(no description)"))))
         .when(Boolean(machine), el => el.child(div().text_size(10).text_color(t.dim).child(machine)))
         .when(subs.length > 0, el => el.child(fold(a, subs)))
         .when(this.hovered === a.address, el => el.child(pin))
@@ -383,6 +461,12 @@ export default class Agents extends View {
     // A group's header; it folds the group. Folded, it says how many and the most urgent state.
     const header = (g) => {
       const open = !this.folded.has(g.id);
+      const cwd = !byPriority && g.id !== "pinned" ? panes().find(p => p.pane === g.members[0]?.pane)?.cwd : null;
+      const homeDir = home().replace(/\/$/, "");
+      const folder = cwd === homeDir ? "~" : cwd?.startsWith(homeDir + "/") ? "~" + cwd.slice(homeDir.length) : cwd;
+      const on = spaces().find(s => s.id === g.members[0]?.space)?.machine ?? null;
+      const root = cwd && this.jj[JSON.stringify([on, cwd])]?.root || cwd;
+      const repoIcon = !on && root && shared("agent-repo-icons")?.[root];
       const top = g.members.reduce((m, a) => ((RANK[a.status] ?? 0) > (RANK[m] ?? 0) ? a.status : m), null);
       return h_flex()
         .id(g.id)
@@ -400,9 +484,11 @@ export default class Agents extends View {
           open ? this.folded.add(g.id) : this.folded.delete(g.id);
           cx.notify();
         })
+        .when(Boolean(repoIcon), el => el.child(image(repoIcon).size(18).flex_none().rounded(4)))
         .child(div().truncate().text_color(t[g.status] ?? t.dim).child(g.label))
         .when(byPriority || !open, (el) => el.child(div().text_color(t.dim).child(String(g.members.length))))
         .child(div().flex_1())
+        .when(Boolean(folder), el => el.child(div().min_w(0).truncate().text_right().text_color(t.dim).tooltip(cwd).child(folder)))
         .when(!open, (el) => el
           .when(!byPriority && top && top !== "idle", (el) => el.child(this.status(t, { status: top }, true)))
           .child(svg("mods/workspace-chrome/chevron-right.svg").size(11).flex_none().text_color(t.dim)));
@@ -429,9 +515,12 @@ export default class Agents extends View {
             .items_center()
             .justify_between()
             .child(div().text_size(11.5).font_medium().text_color(t.dim).child("Agents"))
+            .child(div().flex_1())
+            .child(div().id("agent-starter").size(26).flex_none().flex().items_center().justify_center().rounded(6).text_color(t.dim).hover(s => s.bg(t.hover).text_color(t.foreground)).tooltip("Start an agent").on_click(() => openOverlay({ mod: "agent-starter", kind: "dialog", width: 480, height: 390 })).child(svg("mods/workspace-chrome/plus.svg").size(14)))
             .child(
               div()
                 .id("ag-sort")
+                .ml(6)
                 .text_size(11)
                 .text_color(t.dim)
                 .hover((s) => s.text_color(t.foreground))
