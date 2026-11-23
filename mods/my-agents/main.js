@@ -162,7 +162,12 @@ export default class Agents extends View {
     const icons = shared("agent-repo-icons") ?? {};
     const row = (id, label, action) => div().id(id).px(10).py(8).rounded(6).hover(e => e.bg(t.hover)).cursor_pointer().on_click(action).child(label);
     return v_flex().p(5).bg(t.popover).text_size(13).text_color(t.foreground)
-      .child(row("choose-icon", "Choose repo icon…", (_e, cx) => {
+      .child(row("rename-agent", "Rename agent…", () => {
+        const pane = props().pane;
+        closeOverlay(props().overlay);
+        run("pane.rename", { pane });
+      }))
+      .when(Boolean(folder), el => el.child(row("choose-icon", "Choose repo icon…", (_e, cx) => {
         const overlay = props().overlay;
         cx.spawn(async cx => {
           try {
@@ -180,7 +185,7 @@ export default class Agents extends View {
             closeOverlay(overlay);
           } catch (e) { notify({ title: "Could not save repo icon", body: String(e), level: "error" }); }
         });
-      }))
+      })))
       .when(Boolean(icons[folder]), el => el.child(row("remove-icon", "Remove repo icon", () => {
         const next = { ...icons }; delete next[folder]; setShared("agent-repo-icons", next); closeOverlay(props().overlay);
       })));
@@ -349,7 +354,7 @@ export default class Agents extends View {
           const cwd = panes().find(p => p.pane === a.pane)?.cwd;
           const on = spaces().find(s => s.id === a.space)?.machine ?? null;
           const root = cwd && this.jj[JSON.stringify([on, cwd])]?.root;
-          if (!on && cwd) openOverlay({ mod: "my-agents", kind: "popup", width: 200, height: 90, props: { repoMenu: true, folder: root || cwd } });
+          openOverlay({ mod: "my-agents", kind: "popup", width: 200, height: !on && cwd ? 130 : 50, props: { repoMenu: true, pane: a.pane, folder: !on && cwd ? root || cwd : null } });
         })
           .h(26)
           .px(8)
@@ -401,7 +406,10 @@ export default class Agents extends View {
       }
       const saved = this.titles[a.address]?.replace(/^action\s+required(?:\s*[.\u2026!]+)?\s*\|\s*/i, "");
       const agentTask = generic ? saved || fallback : task;
-      const name = agentTask;
+      const tab = tabs.find(tab => tab.id === a.tab);
+      const tabName = tab?.name?.trim();
+      const namedTab = tabName && !/^(?:tb)?\d+$/.test(tabName) && tabName !== a.program?.name;
+      const name = a.pane_name?.trim() || (namedTab ? tabName : agentTask);
       return h_flex()
         .id(`ag-${a.address}`)
         .when(!byPriority && !isPinned, el => el.ml(14))
@@ -410,7 +418,7 @@ export default class Agents extends View {
           const cwd = panes().find(p => p.pane === a.pane)?.cwd;
           const on = spaces().find(s => s.id === a.space)?.machine ?? null;
           const root = cwd && this.jj[JSON.stringify([on, cwd])]?.root;
-          if (!on && cwd) openOverlay({ mod: "my-agents", kind: "popup", width: 200, height: 90, props: { repoMenu: true, folder: root || cwd } });
+          openOverlay({ mod: "my-agents", kind: "popup", width: 200, height: !on && cwd ? 130 : 50, props: { repoMenu: true, pane: a.pane, folder: !on && cwd ? root || cwd : null } });
         })
         .px(8)
         .h(jj ? 62 : folder ? 44 : 30)
@@ -436,7 +444,7 @@ export default class Agents extends View {
         .child(v_flex().flex_1().min_w(0).gap(1)
           .child(h_flex().min_w(0).gap(5).items_center()
             .child(div().flex_1().min_w(0).truncate().tooltip(name).text_color(a.status === "blocked" ? t.blocked : idle ? t.muted : t.foreground).child(name))
-            .when(generic && !this.titles[a.address] && full && Boolean(more), el => el.child(div().flex_1().min_w(0).truncate().text_color(t.dim).child(`\u00b7 ${more}`))))
+            .when(!a.pane_name?.trim() && !namedTab && generic && !this.titles[a.address] && full && Boolean(more), el => el.child(div().flex_1().min_w(0).truncate().text_color(t.dim).child(`\u00b7 ${more}`))))
           .when(Boolean((byPriority || isPinned) && folder || jj), el => el.child(h_flex().w_full().min_w(0).gap(6).text_size(11)
             .when(Boolean(jj), el => el.child(div().flex_none().text_color(t.ansi4).child(jj.workspace)))
             .when(Boolean((byPriority || isPinned) && folder), el => el.child(div().flex_1().min_w(0).text_right().truncate().text_color(t.dim).tooltip(cwd || "").child(folder || "")))))
